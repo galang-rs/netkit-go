@@ -1,0 +1,31 @@
+# Credentials
+ca.crt
+ca.key
+
+# Binaries
+*.exe
+reverse
+
+# Logs
+*.pcap
+*.log
+*.html
+*.txt
+
+# Go
+go.sum
+vendor/
+*.exe
+
+# Node.js
+scripts/node_modules/
+scripts/package-lock.json
+scripts/npm-debug.log*
+scripts/yarn-debug.log*
+scripts/yarn-error.log*
+scripts/wg_provider.js
+scripts/use_wg_dynamic.js
+
+# System / IDE
+.vscode/
+.idea/
