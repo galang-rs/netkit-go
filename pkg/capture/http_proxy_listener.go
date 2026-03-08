@@ -14,6 +14,7 @@ import (
 	"github.com/bacot120211/netkit-go/pkg/logger"
 	"github.com/bacot120211/netkit-go/pkg/protocol/tls"
 	"github.com/bacot120211/netkit-go/pkg/proxy"
+	netproxy "github.com/bacot120211/netkit-go/pkg/proxy"
 	"github.com/bacot120211/netkit-go/pkg/security"
 )
 
@@ -62,6 +63,11 @@ func (l *HTTPProxyListener) Serve(ctx context.Context) error {
 	logger.Printf("[HTTPProxy] 🌐 MITM Proxy listening on %s — set browser proxy to this address\n", l.addr)
 	l.setCRLUrl()
 
+	// Automatically install CA to Windows Trust Store for seamless SSL experience
+	if err := l.tlsInt.GetCA().InstallToWindows(); err != nil {
+		logger.Printf("[HTTPProxy] ⚠️  Warning: Failed to auto-install CA: %v. You may need to install it manually for HTTPS support.\n", err)
+	}
+
 	go func() {
 		<-ctx.Done()
 		l.listener.Close()
@@ -74,7 +80,9 @@ func (l *HTTPProxyListener) Serve(ctx context.Context) error {
 			case <-ctx.Done():
 				return nil
 			default:
-				logger.Printf("[HTTPProxy] Accept error: %v\n", err)
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					logger.Printf("[HTTPProxy] Accept error: %v\n", err)
+				}
 				continue
 			}
 		}
@@ -99,8 +107,11 @@ func (l *HTTPProxyListener) setCRLUrl() {
 	}
 	_, port, _ := net.SplitHostPort(addr)
 	crlURL := fmt.Sprintf("http://%s:%s/proxy.crl", host, port)
+	aiaURL := fmt.Sprintf("http://%s:%s/proxy.crt", host, port)
 	l.tlsInt.SetCRLURL(crlURL)
+	l.tlsInt.SetAIAURL(aiaURL)
 	logger.Printf("[HTTPProxy] 📜 CRL Distribution Point set to: %s\n", crlURL)
+	logger.Printf("[HTTPProxy] 📜 AIA Distribution Point set to: %s\n", aiaURL)
 }
 
 func (l *HTTPProxyListener) Close() error {
@@ -112,6 +123,11 @@ func (l *HTTPProxyListener) Close() error {
 
 func (l *HTTPProxyListener) SetTunnel(tc *engine.TunnelConfig) {
 	l.tunnel = tc
+}
+
+func (l *HTTPProxyListener) Preload() error {
+	dialer := &netproxy.UniversalDialer{Tunnel: l.tunnel}
+	return dialer.Preload(context.Background())
 }
 
 func (l *HTTPProxyListener) handleConn(src net.Conn) {
@@ -155,14 +171,48 @@ func (l *HTTPProxyListener) handleConn(src net.Conn) {
 	}
 
 	// CRL Hijack: Serve our own CRL to satisfy SChannel revocation checks
-	if req.URL.Path == "/proxy.crl" || req.URL.Path == "/crl" {
+	pathOnly := strings.ToLower(strings.Split(req.URL.Path, "?")[0])
+	pathOnly = strings.TrimRight(pathOnly, "/")
+
+	// If the request Host matches OUR address or it's a relative path starting with /
+	isToUs := req.Host != "" && (strings.Contains(req.Host, localHost) || (l.CRLHost != "" && strings.Contains(req.Host, l.CRLHost)))
+	if req.Host == "" {
+		isToUs = true // Assume it's to us if no host header (some old clients)
+	}
+
+	if pathOnly == "/proxy.crl" || pathOnly == "/crl" || pathOnly == "/revocation" {
 		crl, err := l.tlsInt.GetCRL()
 		if err == nil {
+			// Self-heal: Update CRL info based on how the client reached us
+			if req.Host != "" {
+				l.tlsInt.SetCRLURL(fmt.Sprintf("http://%s/proxy.crl", req.Host))
+				l.tlsInt.SetAIAURL(fmt.Sprintf("http://%s/proxy.crt", req.Host))
+			}
 			logger.Printf("[HTTPProxy] 📜 Serving CRL to %s (Host: %s)\n", remoteAddr, req.Host)
 			_, _ = src.Write([]byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/pkix-crl\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", len(crl))))
 			_, _ = src.Write(crl)
 			return
 		}
+	} else if pathOnly == "/proxy.crt" || pathOnly == "/ca.crt" || pathOnly == "/cert" || pathOnly == "/ca" || pathOnly == "/ca.pem" {
+		// Self-heal: Update CRL info based on how the client reached us
+		if req.Host != "" {
+			l.tlsInt.SetCRLURL(fmt.Sprintf("http://%s/proxy.crl", req.Host))
+			l.tlsInt.SetAIAURL(fmt.Sprintf("http://%s/proxy.crt", req.Host))
+		}
+		cert := l.engine.GetCA().GetCertPEM()
+		logger.Printf("[HTTPProxy] 📜 Serving CA Certificate to %s (Host: %s)\n", remoteAddr, req.Host)
+		_, _ = src.Write([]byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/x-x509-ca-cert\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", len(cert))))
+		_, _ = src.Write(cert)
+		return
+	} else if isToUs && (pathOnly == "" || pathOnly == "/") {
+		// Just a ping/welcome
+		logger.Printf("[HTTPProxy] 🏠 Serving Welcome Page to %s (Host: %s)\n", remoteAddr, req.Host)
+		body := fmt.Sprintf("NetKit Proxy is running.\n\nCA Certificate: http://%s/proxy.crt\nCRL: http://%s/proxy.crl", req.Host, req.Host)
+		if req.Host == "" {
+			body = "NetKit Proxy is running. CA: /proxy.crt, CRL: /proxy.crl"
+		}
+		_, _ = src.Write([]byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)))
+		return
 	}
 
 	// Reset deadline setelah baca request
@@ -226,12 +276,12 @@ func (l *HTTPProxyListener) handleConn(src net.Conn) {
 		_, _ = src.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
 		logger.Printf("[HTTPProxy] 🔒 CONNECT %s (hostname=%s)\n", host, hostname)
-		if l.ShouldMITM == nil || l.ShouldMITM(hostname) {
+		if l.ShouldMITM != nil && l.ShouldMITM(hostname) {
 			logger.Printf("[HTTPProxy] 🔓 Handing off %s to MITM Interceptor\n", host)
 			_ = l.tlsInt.HandleMITM(src, host, hostname, nil, l.tunnel, connInfo)
 		} else {
 			logger.Printf("[HTTPProxy] ⏩ Skipping MITM for %s (not in sniff list)\n", host)
-			dialer := &proxy.UniversalDialer{Tunnel: l.tunnel}
+			dialer := &netproxy.UniversalDialer{Tunnel: l.tunnel}
 			dst, err := dialer.Dial("tcp", host)
 			if err == nil {
 				defer dst.Close()
@@ -278,7 +328,7 @@ func (l *HTTPProxyListener) handleConn(src net.Conn) {
 	}
 	l.engine.Ingest(r)
 
-	dialer := &proxy.UniversalDialer{Tunnel: l.tunnel}
+	dialer := &netproxy.UniversalDialer{Tunnel: l.tunnel}
 	dst, err := dialer.Dial("tcp", host)
 	if err != nil {
 		logger.Printf("[HTTPProxy] ❌ Dial %s error: %v\n", host, err)

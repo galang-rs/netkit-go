@@ -14,6 +14,9 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +31,7 @@ type CA struct {
 	genMu    sync.Mutex
 	genLocks map[string]*sync.Mutex
 	CRLURL   string
+	AIAURL   string
 }
 
 type certCacheEntry struct {
@@ -85,6 +89,10 @@ func (ca *CA) GetCertPEM() []byte {
 
 func (ca *CA) SetCRLURL(url string) {
 	ca.CRLURL = url
+}
+
+func (ca *CA) SetAIAURL(url string) {
+	ca.AIAURL = url
 }
 
 func (ca *CA) GetKeyPEM() []byte {
@@ -200,8 +208,13 @@ func (ca *CA) GenerateMirroredCert(hostname string, templateCert *x509.Certifica
 		newTemplate.NotBefore = now.Add(-24 * time.Hour)
 		newTemplate.NotAfter = now.Add(365 * 24 * time.Hour)
 		newTemplate.AuthorityKeyId = ca.RootCert.SubjectKeyId
+
+		// SChannel compatibility: CRL and AIA are critical for Windows trust
 		if ca.CRLURL != "" {
 			newTemplate.CRLDistributionPoints = []string{ca.CRLURL}
+		}
+		if ca.AIAURL != "" {
+			newTemplate.IssuingCertificateURL = []string{ca.AIAURL}
 		}
 	} else {
 		// Better default matching Google's patterns
@@ -228,8 +241,13 @@ func (ca *CA) GenerateMirroredCert(hostname string, templateCert *x509.Certifica
 			DNSNames:              []string{hostname},
 			AuthorityKeyId:        ca.RootCert.SubjectKeyId,
 		}
+
+		// SChannel compatibility
 		if ca.CRLURL != "" {
 			newTemplate.CRLDistributionPoints = []string{ca.CRLURL}
+		}
+		if ca.AIAURL != "" {
+			newTemplate.IssuingCertificateURL = []string{ca.AIAURL}
 		}
 
 		if ip := net.ParseIP(hostname); ip != nil {
@@ -336,4 +354,35 @@ func (ca *CA) CreateCRL() ([]byte, error) {
 // GenerateCert signs dual certificates (RSA + ECDSA) using default templates
 func (ca *CA) GenerateCert(hostname string) ([]ctls.Certificate, error) {
 	return ca.GenerateMirroredCert(hostname, nil)
+}
+
+// InstallToWindows programmatically installs the Root CA certificate into the Windows
+// Trusted Root Certification Authorities store using certutil.
+func (ca *CA) InstallToWindows() error {
+	certPem := ca.GetCertPEM()
+	if len(certPem) == 0 {
+		return fmt.Errorf("failed to get CA certificate PEM")
+	}
+
+	// Create a temporary file for the certificate
+	tmpFile := filepath.Join(os.TempDir(), "netkit_ca.crt")
+	if err := os.WriteFile(tmpFile, certPem, 0644); err != nil {
+		return fmt.Errorf("failed to write temporary CA file: %v", err)
+	}
+	defer os.Remove(tmpFile)
+
+	fmt.Printf("[TLS] 📜 Attempting to install Root CA into Windows Trust Store...\n")
+
+	// Use certutil to add the certificate to the "Root" store (Trusted Root Certification Authorities)
+	// -addstore: Adds a certificate to a store
+	// -f: Force overwrite if exists
+	// "Root": The system trusted root store
+	cmd := exec.Command("certutil", "-addstore", "-f", "Root", tmpFile)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("certutil failed (error: %v, output: %s)", err, string(output))
+	}
+
+	fmt.Printf("[TLS] ✅ Root CA successfully installed to Windows Trust Store.\n")
+	return nil
 }

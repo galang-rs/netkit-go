@@ -14,7 +14,6 @@ reverse
 
 # Go
 go.sum
-vendor/
 *.exe
 
 # Node.js

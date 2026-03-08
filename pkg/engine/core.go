@@ -50,6 +50,9 @@ type coreEngine struct {
 	closeChan    chan struct{}
 	onDomain     func(domain string) // lowercase: protected by mu
 	workerCount  int
+	ca           interface {
+		GetCertPEM() []byte
+	}
 }
 
 func New() Engine {
@@ -307,4 +310,16 @@ func (e *coreEngine) SetWorkerCount(n int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.workerCount = n
+}
+
+func (e *coreEngine) GetCA() interface {
+	GetCertPEM() []byte
+} {
+	return e.ca
+}
+
+func (e *coreEngine) SetCA(ca interface {
+	GetCertPEM() []byte
+}) {
+	e.ca = ca
 }

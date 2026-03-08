@@ -53,17 +53,42 @@ func RegisterFetchModule(r *Runtime) {
 		}
 
 		// Use http-interperation to execute
-		profile, err := browser.GenerateFromProfile(profileName)
-		if err != nil {
-			return vm.ToValue(map[string]interface{}{
-				"error": fmt.Sprintf("failed to generate profile: %v", err),
-				"ok":    false,
-			})
+		var profile *browser.Profile
+		var err error
+
+		if len(call.Arguments) > 1 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+			optsObj := call.Arguments[1].ToObject(vm)
+			fpVal := optsObj.Get("fingerprint")
+			if fpVal != nil && !goja.IsUndefined(fpVal) && !goja.IsNull(fpVal) {
+				if f, ok := fpVal.Export().(*browser.Profile); ok {
+					profile = f
+					profile.Repair() // Ensure Spec is pinned!
+				} else {
+					// Fallback: try to extract from exported map if ToObject failed for some reason
+					if optsMap, ok := call.Arguments[1].Export().(map[string]interface{}); ok {
+						if f, ok := optsMap["fingerprint"].(*browser.Profile); ok {
+							profile = f
+							profile.Repair() // Ensure Spec is pinned!
+						}
+					}
+				}
+			}
 		}
 
-		r.Unlock()
+		if profile != nil {
+			// fmt.Printf("[DEBUG] Fetch: Reusing provided fingerprint %p\n", profile)
+		} else {
+			// fmt.Printf("[DEBUG] Fetch: No fingerprint provided, generating new one\n")
+			profile, err = browser.GenerateFromProfile(profileName)
+			if err != nil {
+				return vm.ToValue(map[string]interface{}{
+					"error": fmt.Sprintf("failed to generate profile: %v", err),
+					"ok":    false,
+				})
+			}
+		}
+
 		resp, err := sandbox.Fetch(profile, method, rawURL, headers, bodyStr, "", nil)
-		r.Lock()
 		if err != nil {
 			return vm.ToValue(map[string]interface{}{
 				"error":  fmt.Sprintf("request failed: %v", err),
@@ -90,11 +115,41 @@ func RegisterFetchModule(r *Runtime) {
 			"bodyBytes":  resp.Bytes(),
 			"url":        rawURL,
 			"ok":         resp.Status() >= 200 && resp.Status() < 300,
+			"fingerprint": map[string]interface{}{
+				"snapshoot": func() *browser.Profile {
+					return profile
+				},
+			},
 		}
 
 		promise, resolve, _ := vm.NewPromise()
 		resolve(vm.ToValue(result))
 		return vm.ToValue(promise)
+	})
+
+	vm.Set("getBrowserProfile", func(call goja.FunctionCall) goja.Value {
+		profileName := ""
+		if len(call.Arguments) > 0 {
+			profileName = call.Arguments[0].String()
+		}
+
+		profile, err := browser.GenerateFromProfile(profileName)
+		if err != nil {
+			return goja.Null()
+		}
+
+		return vm.ToValue(map[string]interface{}{
+			"user_agent":           profile.UserAgent,
+			"platform":             profile.Platform,
+			"vendor":               profile.Vendor,
+			"screen_width":         profile.ScreenWidth,
+			"screen_height":        profile.ScreenHeight,
+			"heap_size_limit":      profile.HeapSizeLimit,
+			"hardware_concurrency": profile.Concurrency,
+			"timezone":             profile.Timezone,
+			"language":             profile.Language,
+			"languages":            profile.Languages,
+		})
 	})
 }
 

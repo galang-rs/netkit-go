@@ -1,26 +1,44 @@
+const warp = require("./warp.js");
+
 function init() {
     console.log("init() called");
+    Domain("ipinfo.io"); // Enabled for body detection (ensure Root CA is trusted)
 
-    Proxy.Create({
-        addr: ":1111",
-        type: "socks5",
-    }).connect.proxy("socks5://14a91a9508882:a4230c73c3@89.187.29.38:44445")
+    // Initialize Security Scope and Firewall
+    if (typeof Security !== 'undefined') {
+        Security.Scope.SetRole("Server");
+        Security.Scope.SetScope(2, 0, "Global Access"); // 2 = ScopeAll
+
+        Security.Firewall.AddRule({
+            name: "Allow-Web-Port",
+            priority: 1,
+            action: "ALLOW",
+            direction: "BOTH",
+            dstPort: 8080,
+            protocol: "tcp"
+        });
+        Security.Firewall.AddRule({
+            name: "Allow-Socks5-Port",
+            priority: 1,
+            action: "ALLOW",
+            direction: "BOTH",
+            dstPort: 1080,
+            protocol: "tcp|udp"
+        });
+    }
+
+    warp.getWarpConfig().then(wgConfig => {
+        const data = Proxy.Create({
+            addr: ":1080",
+            type: "socks5",
+            crlHost: "43.129.58.116"
+        }).connect.wg(wgConfig).preload();
+        console.log("Warp proxy connected at ", JSON.stringify(data));
+    }).catch(err => {
+        console.error("Failed to get warp config:", err);
+    });
 
     const app = http.createServer();
-
-    // Simple middleware
-    app.use((req, res, next) => {
-        console.log(`[HTTP] ${req.method} ${req.url}`);
-        next();
-    });
-
-    // Route handler
-    app.get("/hello", (req, res) => {
-        res.status(200).json({
-            message: "Hello from Antigravity!",
-            timestamp: new Date().toISOString()
-        });
-    });
 
     app.get("/data", (req, res) => {
         res.status(200).json({
@@ -29,8 +47,8 @@ function init() {
         });
     });
 
-    app.listen(11081);
-    console.log("📡 Server listening on http://localhost:11081");
+    app.listen(8080);
+    console.log("📡 Server listening on http://localhost:8080");
 }
 
 const seenLogs = new Set(); // Global set to deduplicate logs
@@ -40,43 +58,71 @@ function onError(err) {
     console.error(`[JS Error] ${err}`);
 }
 
+// Helper to downgrade HTTPS to HTTP (SSL Stripping)
+function SSLStrip(ctx) {
+    if (!ctx.Flow || !ctx.Flow.IsHTTPResponse()) return;
+
+    // 1. Remove HSTS to prevent browser from enforcing HTTPS
+    ctx.Packet.Payload = HTTP.RemoveHeader(ctx.Packet.Payload, "Strict-Transport-Security");
+
+    // 2. Hijack Redirects: Change https:// location to http://
+    const headers = ctx.Flow.Headers();
+    if (headers && headers["Location"]) {
+        let loc = headers["Location"];
+        if (loc.indexOf("https://") === 0) {
+            loc = loc.replace("https://", "http://");
+            ctx.Packet.Payload = HTTP.ModifyHeader(ctx.Packet.Payload, "Location", loc);
+            console.log(`[SSLStrip] 🔀 Hijacked Redirect: ${loc}`);
+        }
+    }
+
+    // 3. Link Replacement: Replace https:// links in HTML/JS/CSS bodies
+    const contentType = (headers?.["Content-Type"] || "").toLowerCase();
+    if (contentType.includes("text/html") || contentType.includes("javascript") || contentType.includes("text/css")) {
+        const body = ctx.Flow.Body()?.Raw();
+        if (body && body.indexOf("https://") !== -1) {
+            const strippedBody = body.replace(/https:\/\//g, "http://");
+            ctx.Flow.UpdateBody(strippedBody);
+            console.log(`[SSLStrip] ✂️  Stripped HTTPS links in ${ctx.FullURL}`);
+        }
+    }
+
+    // 4. Remove CSP to prevent blocking of insecure resources
+    ctx.Packet.Payload = HTTP.RemoveHeader(ctx.Packet.Payload, "Content-Security-Policy");
+    ctx.Packet.Payload = HTTP.RemoveHeader(ctx.Packet.Payload, "X-Content-Security-Policy");
+}
+
 // Specialized hook for HTTP Requests
 function onRequest(ctx) {
-    const url = ctx.FullURL;
-    if (!url || url === "http://:0/") return;
-
-    // Optimization: If it's a known non-interceptable large file type, bypass early
-    if (url.match(/\.(mp4|mkv|zip|rar|exe|iso|bin|msi)$/i)) {
-        console.log(`[JS] ⚡ Bypassing request for download: ${url}`);
-        ctx.Bypass();
-        return;
-    }
-
-    const headers = ctx.Flow.Headers()?.Raw() || "";
-    const logKey = `req_${url}_${headers.slice(0, 50)}`;
-
-    if (!seenLogs.has(logKey)) {
-        console.log(`[JS] 🛫 Request: ${url}`);
-        if (headers) console.log(`[JS] Headers: ${headers}`);
-        seenLogs.add(logKey);
-    }
+    console.log(JSON.stringify(ctx, null, 2));
 }
 
 // Specialized hook for HTTP Responses
 function onResponse(ctx) {
-    const url = ctx.FullURL;
-    const body = ctx.Flow.Body();
-    if (!body) return;
+    // Apply SSL Stripping if desired
+    SSLStrip(ctx);
 
-    const fullContent = body.WaitFullContent();
-    if (fullContent && fullContent.length > 2) {
-        const bodyPreview = fullContent.slice(0, 100);
-        const logKey = `resp_body_${url}_${bodyPreview}`;
+    const url = ctx.FullURL || "";
+    // DEBUG: Log everything to see URL format
+    if (url !== "") {
+        console.log(`[DEBUG] onResponse URL: ${url}`);
+    }
 
-        if (!seenLogs.has(logKey)) {
-            console.log(`[JS] 📦 Response Body [${url}]:`);
-            console.log(fullContent);
-            seenLogs.add(logKey);
+    if (url.includes("ipinfo.io")) {
+        console.log(`[HTTP Response] Found ipinfo.io -> ${url}`);
+        const flow = ctx.Flow;
+        const bodyObj = flow.Body();
+        if (bodyObj) {
+            const bodyStr = bodyObj.Raw();
+            console.log(`[Body Raw] ${bodyStr}`);
+            try {
+                const bodyJson = bodyObj.Json();
+                console.log(`[Body Json] ${bodyJson}`);
+            } catch (e) {
+                console.log(`[Body Json Error] ${e}`);
+            }
+        } else {
+            console.log(`[Body] Body is NULL for ${url}`);
         }
     }
 }
@@ -108,7 +154,6 @@ function onAds(ctx) {
     if (url.indexOf("youtube.com") !== -1 || url.indexOf("googlevideo.com") !== -1) {
         if (url.indexOf("/ptrack/") !== -1 || url.indexOf("/adunit") !== -1 || url.indexOf("/api/stats/ads") !== -1 || url.indexOf("/pagead/") !== -1) {
             if (!isHTML) {
-                console.log(`[YouTube] 🛡️ Dropped ad component: ${url}`);
                 ctx.Drop();
                 return;
             }
@@ -119,7 +164,6 @@ function onAds(ctx) {
         if (url.indexOf("youtubei/v1/player") !== -1) {
             let body = ctx.Flow.Body()?.Json();
             if (body && body.indexOf("adPlacements") !== -1) {
-                console.log("[YouTube] ✨ Purging adPlacements from Player Config");
                 let cleanBody = body.replace(/"adPlacements":\[.*?\]/g, '"adPlacements":[]');
                 ctx.Flow.UpdateBody(cleanBody);
             }
@@ -138,13 +182,11 @@ function onAds(ctx) {
     // 5. Final Action: Sanitize HTML or Drop Asset
     if (isAd) {
         if (isHTML) {
-            console.log(`[AdBlock] 🛡️ Detected Ad via ${detectReason}: ${hostname || url} -> Sanitizing Body`);
             ctx.Flow.Sanitize();
 
             // Inject smart ad-remover (Aggressive Cheerio-style hiding in browser)
             ctx.Flow.InjectJS(`
                 (function() {
-                    console.log("[Antigravity] Aggressive DOM Ad-Remover Active");
                     const adKeywords = ["img_ad", "ad-slot", "sponsored", "pro_ads", "popunder", "googlesyndication", "doubleclick", "adunit", "gpt", "adsense", "ad-container", "billboard", "leaderboard", "dfp"];
                     
                     const clean = (node) => {
@@ -186,7 +228,6 @@ function onAds(ctx) {
                 })();
             `);
         } else {
-            console.log(`[AdBlock] 🛡️ Detected Ad via ${detectReason}: ${url} -> Dropping Asset`);
             // Better drop: Respond with 403 to the client and then drop the packet to avoid networking
             ctx.Respond("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nBlocked by Antigravity AdBlock");
             ctx.Drop();
@@ -201,27 +242,9 @@ function onAds(ctx) {
 }
 
 // Fallback for non-HTTP traffic (Async DNS/Fetch notifications)
-function onPacket(ctx) {
-    if (ctx.Packet.Metadata) {
-        if (ctx.Packet.Metadata.IsPtrResponse) {
-            console.log(`[JS] Async PTR: ${ctx.Packet.Metadata.Domain}`);
-        }
-        if (ctx.Packet.Metadata.IsFetchResponse) {
-            console.log(`[JS] Async Fetch: ${ctx.Packet.Metadata.URL} (${ctx.Packet.Metadata.Status})`);
-        }
-    }
-}
+function onPacket(ctx) { }
 
-function onConnect(ctx) {
-    // if (ctx.Dest.includes("ipinfo.io") || ctx.Dest.includes("ipfind.net")) {
-    //     console.log(`[JS] 🔄 Routing ipinfo.io via SOCKS5: 89.187.29.38:44445`);
-    //     return {
-    //         type: "socks5",
-    //         url: "socks5://14a91a9508882:a4230c73c3@89.187.29.38:44445"
-    //     };
-    // }
-    console.log(`[JS] 🔌 Connected to: ${ctx.RemoteAddr}`);
-}
+function onConnect(ctx) { }
 
 function closing() {
     console.log("Saving metrics before exit...");

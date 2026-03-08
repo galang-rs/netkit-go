@@ -11,6 +11,7 @@ import (
 	"github.com/bacot120211/netkit-go/pkg/engine"
 	"github.com/bacot120211/netkit-go/pkg/logger"
 	"github.com/bacot120211/netkit-go/pkg/protocol/tls"
+	netproxy "github.com/bacot120211/netkit-go/pkg/proxy"
 	"github.com/bacot120211/netkit-go/pkg/security"
 )
 
@@ -72,7 +73,9 @@ func (l *SOCKS5Listener) Serve(ctx context.Context) error {
 			case <-ctx.Done():
 				return nil
 			default:
-				logger.Printf("[SOCKS5] Accept error: %v\n", err)
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					logger.Printf("[SOCKS5] Accept error: %v\n", err)
+				}
 				continue
 			}
 		}
@@ -92,6 +95,11 @@ func (l *SOCKS5Listener) SetTunnel(tc *engine.TunnelConfig) {
 	l.tunnel = tc
 }
 
+func (l *SOCKS5Listener) Preload() error {
+	dialer := &netproxy.UniversalDialer{Tunnel: l.tunnel}
+	return dialer.Preload(context.Background())
+}
+
 func (l *SOCKS5Listener) setCRLUrl() {
 	if l.listener == nil {
 		return
@@ -108,8 +116,11 @@ func (l *SOCKS5Listener) setCRLUrl() {
 	}
 	_, port, _ := net.SplitHostPort(addr)
 	crlURL := fmt.Sprintf("http://%s:%s/proxy.crl", host, port)
+	aiaURL := fmt.Sprintf("http://%s:%s/proxy.crt", host, port)
 	l.tlsInt.SetCRLURL(crlURL)
+	l.tlsInt.SetAIAURL(aiaURL)
 	logger.Printf("[SOCKS5] 📜 CRL Distribution Point set to: %s\n", crlURL)
+	logger.Printf("[SOCKS5] 📜 AIA Distribution Point set to: %s\n", aiaURL)
 }
 
 func (l *SOCKS5Listener) handleConn(conn net.Conn) {
@@ -123,14 +134,31 @@ func (l *SOCKS5Listener) handleConn(conn net.Conn) {
 			// Might be HTTP (GET /proxy.crl)
 			req, err := http.ReadRequest(reader)
 			if err == nil {
-				if req.URL.Path == "/proxy.crl" || req.URL.Path == "/crl" {
+				cleanPath := strings.TrimRight(req.URL.Path, "/")
+				if cleanPath == "/proxy.crl" || cleanPath == "/crl" {
 					crl, err := l.tlsInt.GetCRL()
 					if err == nil {
+						// Self-heal: Update CRL info based on how the client reached us
+						if req.Host != "" {
+							l.tlsInt.SetCRLURL(fmt.Sprintf("http://%s/proxy.crl", req.Host))
+							l.tlsInt.SetAIAURL(fmt.Sprintf("http://%s/proxy.crt", req.Host))
+						}
 						logger.Printf("[SOCKS5] 📜 Serving CRL to %s\n", conn.RemoteAddr())
 						_, _ = conn.Write([]byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/pkix-crl\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", len(crl))))
 						_, _ = conn.Write(crl)
 						return
 					}
+				} else if cleanPath == "/proxy.crt" || cleanPath == "/ca.crt" || cleanPath == "/cert" || cleanPath == "/ca" || cleanPath == "/ca.pem" {
+					// Self-heal: Update CRL info based on how the client reached us
+					if req.Host != "" {
+						l.tlsInt.SetCRLURL(fmt.Sprintf("http://%s/proxy.crl", req.Host))
+						l.tlsInt.SetAIAURL(fmt.Sprintf("http://%s/proxy.crt", req.Host))
+					}
+					cert := l.engine.GetCA().GetCertPEM()
+					logger.Printf("[SOCKS5] 📜 Serving CA Certificate to %s\n", conn.RemoteAddr())
+					_, _ = conn.Write([]byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/x-x509-ca-cert\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", len(cert))))
+					_, _ = conn.Write(cert)
+					return
 				}
 			}
 			// If not CRL or failed to read, just drop it or return error

@@ -5,6 +5,7 @@ package security
 import (
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -256,8 +257,17 @@ func (fw *Firewall) Evaluate(srcIP string, srcPort int, dstIP string, dstPort in
 		if rule.Direction != DirectionBoth && rule.Direction != direction {
 			continue
 		}
-		if rule.Protocol != "" && rule.Protocol != protocol {
-			continue
+		if rule.Protocol != "" {
+			matched := false
+			for _, proto := range strings.Split(rule.Protocol, "|") {
+				if strings.TrimSpace(proto) == protocol {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
 		}
 		if rule.SrcPort != 0 && rule.SrcPort != srcPort {
 			continue

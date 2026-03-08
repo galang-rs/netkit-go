@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"hash"
 	"io"
+
+	"golang.org/x/crypto/curve25519"
 )
 
 // RegisterCryptoModule injects ctx.Crypto into the JS context.
@@ -152,6 +154,27 @@ func RegisterCryptoModule(jsCtx map[string]interface{}) {
 				return "", err
 			}
 			return hex.EncodeToString(b), nil
+		},
+		// GenerateX25519 generates a new X25519 key pair for WireGuard/WARP.
+		"GenerateX25519": func() (map[string]interface{}, error) {
+			privKey := make([]byte, 32)
+			_, err := rand.Read(privKey)
+			if err != nil {
+				return nil, err
+			}
+			// WireGuard private key clamping
+			privKey[0] &= 248
+			privKey[31] = (privKey[31] & 127) | 64
+
+			pubKey, err := curve25519.X25519(privKey, curve25519.Basepoint)
+			if err != nil {
+				return nil, err
+			}
+
+			return map[string]interface{}{
+				"privateKey": base64.StdEncoding.EncodeToString(privKey),
+				"publicKey":  base64.StdEncoding.EncodeToString(pubKey),
+			}, nil
 		},
 	}
 }

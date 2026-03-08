@@ -63,6 +63,11 @@ type Engine interface {
 
 	// SetWorkerCount sets the number of processing workers.
 	SetWorkerCount(n int)
+
+	// GetCA returns the Root CA used by the engine
+	GetCA() interface {
+		GetCertPEM() []byte
+	}
 }
 
 // TunnelConfig stores configuration for proxy, WireGuard, or CGNAT tunnels

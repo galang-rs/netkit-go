@@ -92,3 +92,71 @@ func TestSSH_Tunneling_RealMock(t *testing.T) {
 		}
 	})
 }
+
+func TestSSH_Manager_Reuse(t *testing.T) {
+	// Setup Mock SSH Server (copied logic for brevity or could refactor)
+	config := &ssh.ServerConfig{
+		PasswordCallback: func(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
+			return nil, nil // Accept all for reuse test
+		},
+	}
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	signer, _ := ssh.NewSignerFromKey(key)
+	config.AddHostKey(signer)
+
+	sshLn, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer sshLn.Close()
+	sshAddr := sshLn.Addr().String()
+	sshHost, sshPortStr, _ := net.SplitHostPort(sshAddr)
+	var sshPort int
+	fmt.Sscanf(sshPortStr, "%d", &sshPort)
+
+	go func() {
+		for {
+			nConn, err := sshLn.Accept()
+			if err != nil {
+				return
+			}
+			_, _, reqs, _ := ssh.NewServerConn(nConn, config)
+			go ssh.DiscardRequests(reqs)
+		}
+	}()
+
+	ctx := context.Background()
+	cfg := &engine.SSHConfig{
+		Host: sshHost,
+		Port: sshPort,
+		User: "reuseuser",
+		Pass: "reusepass",
+	}
+
+	manager := GetSSHManager()
+
+	// First call
+	client1, err := manager.GetOrCreateClient(ctx, cfg)
+	if err != nil {
+		t.Fatalf("First call failed: %v", err)
+	}
+
+	// Second call with same config
+	client2, err := manager.GetOrCreateClient(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Second call failed: %v", err)
+	}
+
+	if client1 != client2 {
+		t.Errorf("Expected same client instance for reuse, got %p and %p", client1, client2)
+	}
+
+	// Third call with different config (different user)
+	cfg2 := *cfg
+	cfg2.User = "otheruser"
+	client3, err := manager.GetOrCreateClient(ctx, &cfg2)
+	if err != nil {
+		t.Fatalf("Third call failed: %v", err)
+	}
+
+	if client1 == client3 {
+		t.Errorf("Expected different client instance for different user")
+	}
+}

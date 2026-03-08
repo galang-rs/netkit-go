@@ -224,6 +224,14 @@ func (m *Manager) setupCA() error {
 		ca, err := tls.LoadCA(certData, keyData)
 		if err == nil {
 			m.RootCA = ca
+			// Register CA in engine for listeners to serve it
+			if ce, ok := m.Engine.(interface {
+				SetCA(interface {
+					GetCertPEM() []byte
+				})
+			}); ok {
+				ce.SetCA(ca)
+			}
 			return nil
 		}
 		logger.Printf("[Manager] Failed to load existing CA: %v. Generating new one.\n", err)
@@ -239,6 +247,16 @@ func (m *Manager) setupCA() error {
 	os.WriteFile(certPath, ca.GetCertPEM(), 0644)
 	os.WriteFile(keyPath, ca.GetKeyPEM(), 0600)
 	logger.Printf("[Manager] 🔥 NEW Root CA generated and saved (ca.crt, ca.key)\n")
+
+	// Register CA in engine for listeners to serve it
+	if ce, ok := m.Engine.(interface {
+		SetCA(interface {
+			GetCertPEM() []byte
+		})
+	}); ok {
+		ce.SetCA(ca)
+	}
+
 	logger.Printf("[Manager] ⚠️  IMPORTANT: If you previous installed a CA, DELETE it from your system and install this new one!\n")
 
 	absPath, _ := filepath.Abs(certPath)

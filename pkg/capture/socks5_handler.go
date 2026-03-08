@@ -233,9 +233,14 @@ func HandleSOCKS5Shared(conn net.Conn, r *bufio.Reader, e engine.Engine, tlsInt 
 
 		if port == 443 {
 			// MITM TLS ONLY if shouldMITM returns true
-			if shouldMITM == nil || shouldMITM(host) {
+			// If target is an IP (e.g. redirected via hosts), we hand off to MITM anyway
+			// so the interceptor can peek the SNI and recover the real hostname.
+			isIP := net.ParseIP(host) != nil
+			isLocal := host == "127.0.0.1" || host == "::1" || host == "localhost"
+
+			if (shouldMITM != nil && shouldMITM(host)) || isIP || isLocal {
 				hostname := host
-				logger.Printf("[%s] 🔓 Handing off %s to MITM Interceptor\n", logPrefix, target)
+				logger.Printf("[%s] 🔓 Handing off %s to MITM Interceptor (SNI Peek enabled for IPs)\n", logPrefix, target)
 				if err := tlsInt.HandleMITM(bc, target, hostname, nil, tunnel, connInfo); err != nil {
 					logger.Printf("[%s] ❌ MITM Error for %s: %v\n", logPrefix, target, err)
 				}
@@ -250,6 +255,16 @@ func HandleSOCKS5Shared(conn net.Conn, r *bufio.Reader, e engine.Engine, tlsInt 
 		dialAddr := target
 		if realIP, ok := tlsInt.ResolvedIPs[host]; ok {
 			dialAddr = net.JoinHostPort(realIP, fmt.Sprintf("%d", port))
+		}
+
+		// HAIRPIN NAT BYPASS: If the target matches our own listener address (public IP),
+		// dial 127.0.0.1 instead to avoid being dropped by firewall/cloud NAT.
+		if lAddr := conn.LocalAddr(); lAddr != nil {
+			_, lPortStr, _ := net.SplitHostPort(lAddr.String())
+			if dialAddr == lAddr.String() || (host == GetLocalIP() && fmt.Sprintf("%d", port) == lPortStr) {
+				logger.Printf("[%s] 🔄 Local hairpin detected for %s, bypassing to 127.0.0.1:%s\n", logPrefix, dialAddr, lPortStr)
+				dialAddr = net.JoinHostPort("127.0.0.1", lPortStr)
+			}
 		}
 
 		dst, err := dialer.Dial("tcp", dialAddr)

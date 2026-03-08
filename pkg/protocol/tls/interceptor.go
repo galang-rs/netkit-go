@@ -52,6 +52,14 @@ func (t *TLSInterceptor) SetCRLURL(url string) {
 	t.ca.SetCRLURL(url)
 }
 
+func (t *TLSInterceptor) SetAIAURL(url string) {
+	t.ca.SetAIAURL(url)
+}
+
+func (t *TLSInterceptor) GetCA() *CA {
+	return t.ca
+}
+
 func (t *TLSInterceptor) GetCRL() ([]byte, error) {
 	return t.ca.CreateCRL()
 }

@@ -47,6 +47,7 @@ type proxyListener interface {
 	Serve(ctx context.Context) error
 	Close() error
 	SetTunnel(tc *engine.TunnelConfig)
+	Preload() error
 }
 
 var (
@@ -88,17 +89,27 @@ func RegisterProxyModule(r *Runtime, jsCtx map[string]interface{}, eng engine.En
 				pass, _ = auth["pass"].(string)
 			}
 
+			// Determine MITM behavior: either use the global shouldMITM or override with the 'mitm' option.
+			localShouldMITM := shouldMITM
+			if m, ok := options["mitm"].(bool); ok {
+				if !m {
+					localShouldMITM = func(host string) bool { return false }
+				} else {
+					localShouldMITM = func(host string) bool { return true }
+				}
+			}
+
 			switch pType {
 			case "http":
 				hl := capture.NewHTTPProxyListener(addr, ca, eng, pool.ResolvedIPs)
-				hl.ShouldMITM = shouldMITM
+				hl.ShouldMITM = localShouldMITM
 				hl.User = user
 				hl.Pass = pass
 				hl.CRLHost = crlHost
 				l = hl
 			case "socks5":
 				sl := capture.NewSOCKS5Listener(addr, ca, eng, pool.ResolvedIPs)
-				sl.ShouldMITM = shouldMITM
+				sl.ShouldMITM = localShouldMITM
 				sl.User = user
 				sl.Pass = pass
 				sl.CRLHost = crlHost
@@ -184,6 +195,9 @@ func RegisterProxyModule(r *Runtime, jsCtx map[string]interface{}, eng engine.En
 				l.SetTunnel(tc)
 				return vm.ToValue(connectObj)
 			})
+			connectObj.Set("preload", func() error {
+				return l.Preload()
+			})
 
 			proxyObj.Set("connect", connectObj)
 			return vm.ToValue(proxyObj), nil
@@ -255,6 +269,9 @@ func RegisterProxyModule(r *Runtime, jsCtx map[string]interface{}, eng engine.En
 				}
 				l.SetTunnel(tc)
 				return vm.ToValue(connectObj)
+			})
+			connectObj.Set("preload", func() error {
+				return l.Preload()
 			})
 
 			proxyObj.Set("connect", connectObj)

@@ -46,6 +46,35 @@ func (d *UniversalDialer) DialContext(ctx context.Context, network, address stri
 	}
 }
 
+func (d *UniversalDialer) Preload(ctx context.Context) error {
+	if d.Tunnel == nil {
+		return nil
+	}
+	switch strings.ToLower(d.Tunnel.Type) {
+	case "wg":
+		if d.Tunnel.WGConfig != "" {
+			return GetWGManager().Preload(d.Tunnel.WGConfig)
+		}
+	case "ssh":
+		if d.Tunnel.SSH != nil {
+			return GetSSHManager().Preload(ctx, d.Tunnel.SSH)
+		}
+	case "proxy", "socks5", "socks5h", "http", "https":
+		if d.Tunnel.URL != "" {
+			// Connect to the proxy once to verify it's reachable.
+			// Dialing a dummy target to check connectivity to the proxy server.
+			conn, err := dialUpstreamProxy(ctx, d.Tunnel.URL, "1.1.1.1:53")
+			if err == nil {
+				conn.Close()
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+	return nil
+}
+
 func dialUpstreamProxy(ctx context.Context, proxyURLStr, targetAddr string) (net.Conn, error) {
 	pURL, err := url.Parse(proxyURLStr)
 	if err != nil {
