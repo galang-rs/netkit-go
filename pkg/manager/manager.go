@@ -610,6 +610,20 @@ func (m *Manager) RegisterDomain(domain string) {
 
 	logger.Printf("[Manager] 🌐 Registering new domain: %s\n", domain)
 
+	if domain == "*" {
+		logger.Printf("[Manager] 🔓 Global intercept enabled via Domain(\"*\")\n")
+		m.Config.MITMAll = true
+		m.Config.ShouldMITM = func(hostname string) bool { return true }
+		if m.SNIList != nil {
+			m.SNIList.ShouldMITM = m.Config.ShouldMITM
+			m.SNIList.AddStrictDomain("*")
+		}
+		if m.Runtime != nil {
+			m.Runtime.ShouldMITM = m.Config.ShouldMITM
+		}
+		return
+	}
+
 	// 1. Add to HostsManager (for transparent redirection)
 	if m.HostsMgr != nil {
 		_ = m.HostsMgr.RedirectDomains([]string{domain})

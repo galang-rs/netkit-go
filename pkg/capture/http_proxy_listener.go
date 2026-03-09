@@ -100,7 +100,7 @@ func (l *HTTPProxyListener) setCRLUrl() {
 	if host == "" {
 		// Jika addr adalah ":port", ubah ke GetLocalIP() untuk Windows compatibility
 		if strings.HasPrefix(addr, ":") || strings.HasPrefix(addr, "[::]") {
-			host = GetLocalIP()
+			host = "127.0.0.1"
 		} else {
 			host, _, _ = net.SplitHostPort(addr)
 		}

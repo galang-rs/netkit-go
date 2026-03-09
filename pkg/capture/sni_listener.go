@@ -263,7 +263,7 @@ func (l *SNIListener) IsStrictDomain(domain string) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	for _, d := range l.StrictInterceptDomains {
-		if d == domain {
+		if d == "*" || d == domain {
 			return true
 		}
 	}

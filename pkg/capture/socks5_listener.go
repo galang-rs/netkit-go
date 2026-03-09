@@ -109,7 +109,7 @@ func (l *SOCKS5Listener) setCRLUrl() {
 	if host == "" {
 		// Jika addr adalah ":port", ubah ke GetLocalIP() untuk Windows compatibility
 		if strings.HasPrefix(addr, ":") || strings.HasPrefix(addr, "[::]") {
-			host = GetLocalIP()
+			host = "127.0.0.1" // Prefer 127.0.0.1 for local listeners
 		} else {
 			host, _, _ = net.SplitHostPort(addr)
 		}
@@ -140,8 +140,13 @@ func (l *SOCKS5Listener) handleConn(conn net.Conn) {
 					if err == nil {
 						// Self-heal: Update CRL info based on how the client reached us
 						if req.Host != "" {
+							host, _, _ := net.SplitHostPort(req.Host)
+							if host == "" {
+								host = req.Host
+							}
 							l.tlsInt.SetCRLURL(fmt.Sprintf("http://%s/proxy.crl", req.Host))
 							l.tlsInt.SetAIAURL(fmt.Sprintf("http://%s/proxy.crt", req.Host))
+							logger.Printf("[SOCKS5] 📜 Self-healed CRL URL to: http://%s/proxy.crl (Target: %s)\n", req.Host, conn.RemoteAddr())
 						}
 						logger.Printf("[SOCKS5] 📜 Serving CRL to %s\n", conn.RemoteAddr())
 						_, _ = conn.Write([]byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/pkix-crl\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", len(crl))))

@@ -89,8 +89,13 @@ func RegisterProxyModule(r *Runtime, jsCtx map[string]interface{}, eng engine.En
 				pass, _ = auth["pass"].(string)
 			}
 
-			// Determine MITM behavior: either use the global shouldMITM or override with the 'mitm' option.
-			localShouldMITM := shouldMITM
+			// Determine MITM behavior: either use the runtime's dynamic shouldMITM or override with the 'mitm' option.
+			localShouldMITM := func(host string) bool {
+				if r.ShouldMITM != nil {
+					return r.ShouldMITM(host)
+				}
+				return false
+			}
 			if m, ok := options["mitm"].(bool); ok {
 				if !m {
 					localShouldMITM = func(host string) bool { return false }
