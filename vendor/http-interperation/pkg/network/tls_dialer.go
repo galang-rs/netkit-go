@@ -176,7 +176,18 @@ func (d *TLSDialer) dialTLSContextWithALPN(ctx context.Context, network, addr, s
 		ClientSessionCache:     sessionCache,
 	}
 
-	uConn := utls.UClient(rawConn, tlsConfig, d.Profile.ClientHello, false, true, true)
+	// Create uTLS connection with custom fingerprint
+	uConn := utls.UClient(rawConn, tlsConfig, utls.HelloCustom, false, true, true)
+
+	// Generate a fresh spec with consistent extension order for JA3 consistency.
+	// NewOrderedSpec creates new extension instances each time (no shared state)
+	// but re-sorts them to match the cached extension order.
+	if spec, err := d.Profile.NewOrderedSpec(); err == nil {
+		if err := uConn.ApplyPreset(spec); err != nil {
+			rawConn.Close()
+			return nil, fmt.Errorf("failed to apply uTLS spec: %w", err)
+		}
+	}
 
 	// Perform TLS handshake
 	if err := uConn.Handshake(); err != nil {
@@ -315,7 +326,19 @@ func NewAdaptiveTransportWithDialer(profile *TLSProfile, tcpProfile *TCPProfile,
 				ClientSessionCache:     utls.NewLRUClientSessionCache(32),
 			}
 
-			uConn := utls.UClient(rawConn, tlsConfig, dialer.Profile.ClientHello, false, true, true)
+			// Create uTLS connection with custom fingerprint
+			uConn := utls.UClient(rawConn, tlsConfig, utls.HelloCustom, false, true, true)
+
+			// Generate a fresh spec with cached extension order
+			if spec, err := dialer.Profile.NewOrderedSpec(); err == nil {
+				if err := uConn.ApplyPreset(spec); err != nil {
+					rawConn.Close()
+					return nil, fmt.Errorf("failed to apply uTLS spec: %w", err)
+				}
+			} else {
+				// Fallback to ID-based setup
+				uConn = utls.UClient(rawConn, tlsConfig, dialer.Profile.ClientHello, false, true, true)
+			}
 
 			if err := uConn.Handshake(); err != nil {
 				rawConn.Close()

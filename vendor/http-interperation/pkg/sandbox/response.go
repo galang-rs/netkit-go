@@ -5,7 +5,6 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"encoding/json"
-	"http-interperation/pkg/browser"
 	"io"
 	"strings"
 
@@ -24,7 +23,6 @@ type Response struct {
 	bodyStream io.ReadCloser // For streaming responses
 	localAddr  string        // Source address:port
 	remoteAddr string        // Destination address:port
-	profile    *browser.Profile
 }
 
 // decompressBody automatically decompresses response body based on Content-Encoding
@@ -135,9 +133,4 @@ func (r *Response) LocalAddr() string {
 // RemoteAddr returns the destination address used for the connection
 func (r *Response) RemoteAddr() string {
 	return r.remoteAddr
-}
-
-// Profile returns the browser profile used for the request
-func (r *Response) Profile() *browser.Profile {
-	return r.profile
 }

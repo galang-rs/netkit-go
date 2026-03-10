@@ -83,21 +83,10 @@ func GenerateFromProfile(name string) (*Profile, error) {
 	}
 
 	// Step 4: Create profile with CONSISTENT values
-	tlsProfile := &network.TLSProfile{
-		Name:            randomProfile.Name,
-		ClientHello:     randomProfile.ClientHello,
-		UserAgent:       userAgent,
-		Platform:        randomProfile.Platform,
-		Vendor:          randomProfile.Vendor,
-		SecChUa:         randomProfile.SecChUa,
-		SecChUaMobile:   randomProfile.SecChUaMobile,
-		SecChUaPlatform: randomProfile.SecChUaPlatform,
-	}
+	tlsProfile := randomProfile.Clone()
 
-	// Step 4.5: Pin the spec for JA3 consistency if valid
-	if spec, err := tlsProfile.ToSpec(); err == nil {
-		tlsProfile.Spec = spec
-	}
+	// Step 4.5: Ensure consistency
+	// spec generation is now done on-demand in dialer to avoid pointer sharing
 
 	// Step 5: Generate sec-ch-ua from User-Agent version for Chrome-based browsers
 	if strings.Contains(userAgent, "Chrome/") {
@@ -188,12 +177,8 @@ func (p *Profile) Repair() {
 		p.TLSProfile.ClientHello = proto.ClientHello
 	}
 
-	// Re-cache Spec if missing
-	if p.TLSProfile.Spec == nil {
-		if spec, err := p.TLSProfile.ToSpec(); err == nil {
-			p.TLSProfile.Spec = spec
-		}
-	}
+	// Pin the spec so the extension order is frozen for this profile
+	p.TLSProfile.EnsureSpec()
 
 	// Initialize CookieJar if missing (not persisted in JSON)
 	if p.CookieJar == nil {

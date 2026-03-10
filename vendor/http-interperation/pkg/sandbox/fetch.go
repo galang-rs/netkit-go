@@ -185,7 +185,6 @@ func Fetch(profile *browser.Profile, method, urlStr string, headers map[string]s
 		cookies:    resp.Cookies(),
 		localAddr:  "local",
 		remoteAddr: "remote",
-		profile:    profile,
 	}
 
 	return response, nil
@@ -354,7 +353,6 @@ func FetchWithDialer(profile *browser.Profile, dialFunc network.DialContextFunc,
 		cookies:    resp.Cookies(),
 		localAddr:  "local",
 		remoteAddr: "remote",
-		profile:    profile,
 	}
 
 	return response, nil
@@ -416,7 +414,6 @@ func FetchStream(profile *browser.Profile, method, urlStr string, headers map[st
 		bodyStream: resp.Body,
 		header:     resp.Header,
 		cookies:    resp.Cookies(),
-		profile:    profile,
 	}, nil
 }
 
@@ -463,6 +460,5 @@ func FetchStreamWithDialer(profile *browser.Profile, dialFunc network.DialContex
 		bodyStream: resp.Body,
 		header:     resp.Header,
 		cookies:    resp.Cookies(),
-		profile:    profile,
 	}, nil
 }
