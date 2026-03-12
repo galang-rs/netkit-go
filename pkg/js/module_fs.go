@@ -234,14 +234,49 @@ func RegisterFSModule(jsCtx map[string]interface{}, cfg *FSModuleConfig) {
 				flowHistory = flowHistory[len(flowHistory)-historyLimit:]
 			}
 		},
-		"Decompress": func(raw []interface{}) string {
-			data := make([]byte, len(raw))
-			for i, v := range raw {
-				switch n := v.(type) {
-				case int64:
-					data[i] = byte(n)
-				case float64:
-					data[i] = byte(n)
+		"Decompress": func(args ...interface{}) string {
+			if len(args) == 0 {
+				return ""
+			}
+			// First arg: data (string or byte array)
+			var data []byte
+			switch v := args[0].(type) {
+			case string:
+				data = []byte(v)
+			case []byte:
+				data = v
+			case []interface{}:
+				data = make([]byte, len(v))
+				for i, x := range v {
+					switch n := x.(type) {
+					case int64:
+						data[i] = byte(n)
+					case float64:
+						data[i] = byte(n)
+					}
+				}
+			default:
+				return ""
+			}
+			if len(data) == 0 {
+				return ""
+			}
+			// Second arg: encoding (optional)
+			if len(args) >= 2 {
+				if enc, ok := args[1].(string); ok && enc != "" {
+					enc = strings.ToLower(strings.TrimSpace(enc))
+					// Try direct decompression first
+					if decoded, err := decompressBody(data, enc); err == nil {
+						return string(decoded)
+					}
+					// Try dechunking first, then decompress
+					dechunked := Dechunk(data)
+					if len(dechunked) > 0 && len(dechunked) != len(data) {
+						if decoded, err := decompressBody(dechunked, enc); err == nil {
+							return string(decoded)
+						}
+					}
+					// Fallback to auto-detection
 				}
 			}
 			return DecompressAuto(data)

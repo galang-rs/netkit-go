@@ -1,74 +1,99 @@
-const warp = require("./warp.js");
-
 function init() {
     console.log("init() called");
-    Domain("ipinfo.io"); // Enabled for body detection (ensure Root CA is trusted)
-
-    // Initialize Security Scope and Firewall
-    if (typeof Security !== 'undefined') {
-        Security.Scope.SetRole("Server");
-        Security.Scope.SetScope(2, 0, "Global Access"); // 2 = ScopeAll
-
-        Security.Firewall.AddRule({
-            name: "Allow-Web-Port",
-            priority: 1,
-            action: "ALLOW",
-            direction: "BOTH",
-            dstPort: 80, // Standard HTTP
-            protocol: "tcp"
-        });
-        Security.Firewall.AddRule({
-            name: "Allow-DNS",
-            priority: 1,
-            action: "ALLOW",
-            direction: "BOTH",
-            dstPort: 53,
-            protocol: "udp"
-        });
-    }
-
-    // Register domains for transparent interception
-    Domain("*")
-
-    const data = Proxy.Create({
-        addr: ":1080",
-        type: "socks5"
-    })
-
-    const app = http.createServer();
-
-    app.get("/data", (req, res) => {
-        res.status(200).json({
-            message: FS.Data(),
-            timestamp: new Date().toISOString()
-        });
+    Proxy.Create({ addr: ":1080", type: "socks5" });
+    Domain("*");
+    
+    // Explicitly enable hooks
+    setFunc({
+        onRequest: "onRequest",
+        onResponse: "onResponse",
+        onError: "onError"
     });
-
-    app.listen(8080);
-    console.log("📡 Server listening on http://localhost:8080");
 }
-// Global error handler
+
+const seenLogs = new Set(); 
+
 function onError(err) {
     console.error(`[JS Error] ${err}`);
 }
 
-// Specialized hook for HTTP Requests
-function onRequest(ctx) { }
+function onRequest(ctx) {
+    try {
+        const url = ctx.FullURL;
+        if (!url || url === "http://:0/") return;
 
-// Specialized hook for HTTP Responses
-function onResponse(ctx) { }
+        const flow = ctx.Flow;
+        const flowID = flow.ID();
+        const ref = ctx.Reference();
+        const metadata = ctx.Packet.Metadata;
+        const isDecrypted = metadata.Decrypted || false;
+        
+        const body = flow.Body();
+        const fullBody = body.WaitFullContent() || "";
+        const rawBody = body.Raw() || "";
+        const rawHeaders = flow.Headers()?.Raw() || "";
+        
+        // Extract Content-Type from raw headers manually since ContentType() is missing
+        let contentType = "N/A";
+        const ctMatch = rawHeaders.match(/Content-Type:\s*(.*)/i);
+        if (ctMatch) contentType = ctMatch[1].trim();
+        
+        const snapshot = flow.Snapshot();
+        const method = snapshot.method || "UNKNOWN";
 
+        const logPrefix = `[REQ][${ref}][Decrypted: ${isDecrypted}][Session: ${flowID}]\n` +
+                          `URL: ${method} ${url}\n` +
+                          `Content-Type: ${contentType}\n\n`;
 
-// Global Ad-Blocking Hook
-function onAds(ctx) { }
-
-// Fallback for non-HTTP traffic (Async DNS/Fetch notifications)
-function onPacket(ctx) { }
-
-function onConnect(ctx) {
-    console.log(JSON.stringify(ctx, null, 2))
-    return connect.proxy("socks5://samdues:geming@43.129.58.116:1080")
+        FS.SaveFile(`logs/${ref}_req_headers.txt`, logPrefix + rawHeaders);
+        if (fullBody) FS.SaveFile(`logs/${ref}_req_body_decoded.txt`, fullBody);
+        if (rawBody) FS.SaveFile(`logs/${ref}_req_body_raw.txt`, rawBody);
+        
+    } catch (e) {
+        console.error(`[onRequest Error] ${e}`);
+    }
 }
+
+function onResponse(ctx) {
+    try {
+        const url = ctx.FullURL;
+        const flow = ctx.Flow;
+        const flowID = flow.ID();
+        const ref = ctx.Reference();
+        const metadata = ctx.Packet.Metadata;
+        const isDecrypted = metadata.Decrypted || false;
+
+        const body = flow.Body();
+        const fullBody = body.WaitFullContent() || "";
+        const rawBody = body.Raw() || "";
+        const rawHeaders = flow.Headers()?.Raw() || "";
+        
+        let contentType = "N/A";
+        const ctMatch = rawHeaders.match(/Content-Type:\s*(.*)/i);
+        if (ctMatch) contentType = ctMatch[1].trim();
+
+        let encoding = "identity";
+        const encMatch = rawHeaders.match(/Content-Encoding:\s*(.*)/i);
+        if (encMatch) encoding = encMatch[1].trim();
+        
+        const snapshot = flow.Snapshot();
+        const status = snapshot.statusCode || snapshot.status || "UNKNOWN";
+
+        const logPrefix = `[RES][${ref}][Decrypted: ${isDecrypted}][Session: ${flowID}]\n` +
+                          `Status: ${status} for ${url}\n` +
+                          `Content-Type: ${contentType}\n` +
+                          `Content-Encoding: ${encoding}\n\n`;
+
+        FS.SaveFile(`logs/${ref}_res_headers.txt`, logPrefix + rawHeaders);
+        if (fullBody) FS.SaveFile(`logs/${ref}_res_body_decoded.txt`, fullBody);
+        if (rawBody) FS.SaveFile(`logs/${ref}_res_body_raw.txt`, rawBody);
+        
+    } catch (e) {
+        console.error(`[onResponse Error] ${e}`);
+    }
+}
+
+function onAds(ctx) { }
 
 function closing() {
     console.log("Saving metrics before exit...");

@@ -30,7 +30,7 @@ func (t *TLSTools) ReconstructClientHello(ch *tls.ClientHello) []byte {
 }
 
 // RegisterTLSModule injects ctx.TLS into the JS context.
-func RegisterTLSModule(r *Runtime, jsCtx map[string]interface{}) {
+func RegisterTLSModule(r *Runtime, jsCtx map[string]interface{}, eng engine.Engine) {
 	vm := r.vm
 	tools := &TLSTools{vm: vm}
 
@@ -78,6 +78,14 @@ func RegisterTLSModule(r *Runtime, jsCtx map[string]interface{}) {
 		// IsClientHello checks for ClientHello specifically.
 		"IsClientHello": func(data []byte) bool {
 			return IsTLSClientHello(data)
+		},
+		// InstallCA installs the root CA to the Windows trust store.
+		"InstallCA": func() (bool, error) {
+			if m, ok := eng.(interface{ InstallCA() error }); ok {
+				err := m.InstallCA()
+				return err == nil, err
+			}
+			return false, fmt.Errorf("engine does not support CA installation")
 		},
 		// IsServerHello checks for ServerHello.
 		"IsServerHello": func(data []byte) bool {

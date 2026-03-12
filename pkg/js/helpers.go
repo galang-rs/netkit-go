@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 )
 
 // gojaToBytes converts various JS-compatible types to Go []byte.
@@ -55,6 +56,15 @@ func decompressDeflate(data []byte) ([]byte, error) {
 
 func decompressBrotli(data []byte) ([]byte, error) {
 	r := brotli.NewReader(bytes.NewReader(data))
+	return io.ReadAll(r)
+}
+
+func decompressZstd(data []byte) ([]byte, error) {
+	r, err := zstd.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
 	return io.ReadAll(r)
 }
 

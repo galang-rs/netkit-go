@@ -100,22 +100,40 @@ func (r *Relay) forward(src, dst net.Conn, direction string, done chan struct{})
 				srcPort = uint16(v)
 			}
 
+			dstHost, dstPortStr, _ := net.SplitHostPort(dstAddr)
+			var dstPort uint16
+			if v, parseErr := strconv.ParseUint(dstPortStr, 10, 16); parseErr == nil {
+				dstPort = uint16(v)
+			}
+
 			// Use atomic ID instead of time-based (avoids collisions)
 			p := &engine.Packet{
-				ID:         engine.NextPacketID(),
-				Timestamp:  time.Now().Unix(),
-				Source:     srcHost,
-				SourcePort: srcPort,
-				Dest:       r.TargetIP,
-				DestPort:   r.TargetPort,
-				Protocol:   "TCP",
-				Payload:    append([]byte(nil), buf[:n]...),
+				ID:        engine.NextPacketID(),
+				Timestamp: time.Now().Unix(),
+				Protocol:  "TCP",
+				Payload:   append([]byte(nil), buf[:n]...),
 				Metadata: map[string]interface{}{
 					"Direction": direction,
 					"Decrypted": r.Decrypted,
 					"Hostname":  r.Hostname,
 				},
 				Conn: r.Conn,
+			}
+
+			// Set Source/Dest based on direction so request & response
+			// share the same bidirectional session ID in the engine.
+			if direction == "REQUEST" {
+				// Client -> Server
+				p.Source = srcHost
+				p.SourcePort = srcPort
+				p.Dest = r.TargetIP
+				p.DestPort = r.TargetPort
+			} else {
+				// RESPONSE: Server -> Client
+				p.Source = r.TargetIP
+				p.SourcePort = r.TargetPort
+				p.Dest = dstHost
+				p.DestPort = dstPort
 			}
 
 			// Process through engine (sniffing/injection)

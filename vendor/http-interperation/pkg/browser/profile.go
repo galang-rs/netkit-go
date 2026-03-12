@@ -177,8 +177,7 @@ func (p *Profile) Repair() {
 		p.TLSProfile.ClientHello = proto.ClientHello
 	}
 
-	// Pin the spec so the extension order is frozen for this profile
-	p.TLSProfile.EnsureSpec()
+	// Re-cache Spec if missing - REMOVED to avoid pointer sharing
 
 	// Initialize CookieJar if missing (not persisted in JSON)
 	if p.CookieJar == nil {

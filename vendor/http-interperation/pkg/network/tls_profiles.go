@@ -3,8 +3,6 @@ package network
 
 import (
 	"fmt"
-	"reflect"
-	"sync"
 
 	utls "github.com/bogdanfinn/utls"
 )
@@ -27,11 +25,6 @@ type TLSProfile struct {
 	MaxHeaderListSize uint32 `json:"max_header_list_size"`
 	HeaderTableSize   uint32 `json:"header_table_size"`
 	EnablePush        bool   `json:"enable_push"`
-
-	// Cached extension order for fingerprint consistency (generated once, reused across dials)
-	extensionOrder []string              `json:"-"`
-	Spec           *utls.ClientHelloSpec `json:"-"` // kept only for compatibility - not shared directly
-	specOnce       sync.Once             `json:"-"`
 }
 
 // Pre-defined browser profiles
@@ -241,7 +234,7 @@ func GetProfileByName(name string) (*TLSProfile, error) {
 
 // Clone creates a copy of the TLS profile
 func (p *TLSProfile) Clone() *TLSProfile {
-	clone := &TLSProfile{
+	return &TLSProfile{
 		Name:              p.Name,
 		ClientHello:       p.ClientHello,
 		UserAgent:         p.UserAgent,
@@ -257,69 +250,6 @@ func (p *TLSProfile) Clone() *TLSProfile {
 		HeaderTableSize:   p.HeaderTableSize,
 		EnablePush:        p.EnablePush,
 	}
-	// Pre-cache the extension order immediately so every clone
-	// has the same fixed extension ordering from the start.
-	clone.EnsureSpec()
-	return clone
-}
-
-// EnsureSpec generates the initial spec to cache the extension order.
-// This pins the extension order (which ShuffleChromeTLSExtensions randomizes)
-// so that all connections using this profile have a consistent JA3 fingerprint.
-func (p *TLSProfile) EnsureSpec() {
-	p.specOnce.Do(func() {
-		if p.ClientHello.Str() == utls.HelloCustom.Str() || p.ClientHello.Str() == utls.HelloGolang.Str() {
-			return
-		}
-		spec, err := utls.UTLSIdToSpec(p.ClientHello)
-		if err == nil {
-			p.Spec = &spec
-			// Cache the extension type order
-			p.extensionOrder = make([]string, len(spec.Extensions))
-			for i, ext := range spec.Extensions {
-				p.extensionOrder[i] = reflect.TypeOf(ext).String()
-			}
-		}
-	})
-}
-
-// NewOrderedSpec generates a fresh ClientHelloSpec with new extension instances
-// but re-sorted to match the cached extension order for JA3 consistency.
-func (p *TLSProfile) NewOrderedSpec() (*utls.ClientHelloSpec, error) {
-	p.EnsureSpec()
-	if p.extensionOrder == nil {
-		return nil, fmt.Errorf("no cached extension order")
-	}
-
-	// Generate a fresh spec (new extension instances, no shared state)
-	freshSpec, err := utls.UTLSIdToSpec(p.ClientHello)
-	if err != nil {
-		return nil, err
-	}
-
-	// Re-sort the fresh spec's extensions to match the cached order
-	ordered := make([]utls.TLSExtension, 0, len(freshSpec.Extensions))
-	remaining := make([]utls.TLSExtension, len(freshSpec.Extensions))
-	copy(remaining, freshSpec.Extensions)
-
-	for _, typeName := range p.extensionOrder {
-		for j, ext := range remaining {
-			if ext != nil && reflect.TypeOf(ext).String() == typeName {
-				ordered = append(ordered, ext)
-				remaining[j] = nil
-				break
-			}
-		}
-	}
-	// Append any unmatched extensions at the end
-	for _, ext := range remaining {
-		if ext != nil {
-			ordered = append(ordered, ext)
-		}
-	}
-
-	freshSpec.Extensions = ordered
-	return &freshSpec, nil
 }
 
 // TCPProfile represents a TCP stack fingerprint

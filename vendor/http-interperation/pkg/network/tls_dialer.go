@@ -44,20 +44,26 @@ func NewTLSDialer(profile *TLSProfile, tcpProfile *TCPProfile, proxyAddr string,
 			Resolver: &net.Resolver{
 				PreferGo: true,
 				Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-					// Use public DNS servers directly to bypass broken system DNS
-					// (system DNS may be unreachable due to WireGuard routing or hosts file)
-					publicDNS := []string{"8.8.8.8:53", "1.1.1.1:53", "8.8.4.4:53"}
+					// Try system DNS first (works when no WireGuard tunnel is active,
+					// e.g. during initial WARP registration).
+					// Fall back to public DNS if system DNS fails (e.g. WireGuard
+					// routing breaks system DNS).
 					d := net.Dialer{
 						Timeout: time.Second * 3,
 					}
+					// 1. System DNS first
+					if conn, err := d.DialContext(ctx, "udp4", address); err == nil {
+						return conn, nil
+					}
+					// 2. Public DNS fallback
+					publicDNS := []string{"8.8.8.8:53", "1.1.1.1:53", "8.8.4.4:53"}
 					for _, dns := range publicDNS {
 						conn, err := d.DialContext(ctx, "udp4", dns)
 						if err == nil {
 							return conn, nil
 						}
 					}
-					// Last resort: try the original system DNS address
-					return d.DialContext(ctx, "udp4", address)
+					return nil, fmt.Errorf("all DNS servers unreachable")
 				},
 			},
 		},
@@ -179,13 +185,26 @@ func (d *TLSDialer) dialTLSContextWithALPN(ctx context.Context, network, addr, s
 	// Create uTLS connection with custom fingerprint
 	uConn := utls.UClient(rawConn, tlsConfig, utls.HelloCustom, false, true, true)
 
-	// Generate a fresh spec with consistent extension order for JA3 consistency.
-	// NewOrderedSpec creates new extension instances each time (no shared state)
-	// but re-sorts them to match the cached extension order.
-	if spec, err := d.Profile.NewOrderedSpec(); err == nil {
-		if err := uConn.ApplyPreset(spec); err != nil {
-			rawConn.Close()
-			return nil, fmt.Errorf("failed to apply uTLS spec: %w", err)
+	// Re-create Spec on every dial to avoid sharing state between connections
+	// while maintaining fingerprint consistency via the underlying ID.
+	// Note: ClientHelloID contains uncomparable fields, so compare by Str()
+	if d.Profile.ClientHello.Str() != utls.HelloCustom.Str() && d.Profile.ClientHello.Str() != utls.HelloGolang.Str() {
+		spec, err := utls.UTLSIdToSpec(d.Profile.ClientHello)
+		if err == nil {
+			// Override ALPN in the spec if custom protos were provided
+			// (ApplyPreset would otherwise overwrite our config.NextProtos)
+			if protos != nil {
+				for _, ext := range spec.Extensions {
+					if alpn, ok := ext.(*utls.ALPNExtension); ok {
+						alpn.AlpnProtocols = protos
+						break
+					}
+				}
+			}
+			if err := uConn.ApplyPreset(&spec); err != nil {
+				rawConn.Close()
+				return nil, fmt.Errorf("failed to apply uTLS spec: %w", err)
+			}
 		}
 	}
 
@@ -195,7 +214,10 @@ func (d *TLSDialer) dialTLSContextWithALPN(ctx context.Context, network, addr, s
 		return nil, fmt.Errorf("TLS handshake failed for %s: %w", serverName, err)
 	}
 
-	return uConn, nil
+	// Return the embedded *tls.Conn (not *utls.UConn) so that fhttp's
+	// type assertion pconn.conn.(*tls.Conn) succeeds and HTTP/2 routing
+	// via TLSNextProto works correctly when ALPN negotiates "h2".
+	return uConn.Conn, nil
 }
 
 // AdaptiveTransport handles both HTTP/1.1 and HTTP/2 based on ALPN negotiation
@@ -329,8 +351,9 @@ func NewAdaptiveTransportWithDialer(profile *TLSProfile, tcpProfile *TCPProfile,
 			// Create uTLS connection with custom fingerprint
 			uConn := utls.UClient(rawConn, tlsConfig, utls.HelloCustom, false, true, true)
 
-			// Generate a fresh spec with cached extension order
-			if spec, err := dialer.Profile.NewOrderedSpec(); err == nil {
+			// Apply spec from profile for fingerprint consistency
+			spec, specErr := dialer.Profile.ToSpec()
+			if specErr == nil && spec != nil {
 				if err := uConn.ApplyPreset(spec); err != nil {
 					rawConn.Close()
 					return nil, fmt.Errorf("failed to apply uTLS spec: %w", err)
@@ -345,7 +368,8 @@ func NewAdaptiveTransportWithDialer(profile *TLSProfile, tcpProfile *TCPProfile,
 				return nil, fmt.Errorf("TLS handshake failed: %w", err)
 			}
 
-			return uConn, nil
+			// Return embedded *tls.Conn for proper fhttp HTTP/2 detection
+			return uConn.Conn, nil
 		},
 		DialContext:           dialFunc,
 		MaxIdleConns:          100,

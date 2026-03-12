@@ -75,6 +75,7 @@ func main() {
 	flag.StringVar(&cfg.TunnelPass, "tunnel-pass", "secret", "Password for NK-Tunnel")
 	flag.StringVar(&cfg.TunnelClientTo, "tunnel", "", "Connect to NK-Tunnel server (format: ip:port:user:pass:remote_port:type)")
 
+	installCA := flag.Bool("install-ca", false, "Install the Root CA to Windows Trusted Root store and exit")
 	listIfaces := flag.Bool("list-ifaces", false, "List all available network interfaces and IPs, then exit")
 	flag.Parse()
 
@@ -82,6 +83,20 @@ func main() {
 	perf.OptimizeCPU(cfg.MaxProcs)
 
 	logger.Enabled = cfg.Verbose
+
+	if *installCA {
+		m := manager.NewManager(cfg)
+		if err := m.Setup(); err != nil {
+			logger.Errorf("[ERROR] CA Setup failed: %v\n", err)
+			os.Exit(1)
+		}
+		if err := m.InstallCA(); err != nil {
+			logger.Errorf("[ERROR] CA Installation failed: %v\n", err)
+			os.Exit(1)
+		}
+		logger.Infof("[Main] CA Installation completed successfully.\n")
+		os.Exit(0)
+	}
 
 	if *listIfaces {
 		ifaces, err := net.Interfaces()

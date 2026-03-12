@@ -62,6 +62,24 @@ func RegisterFlowModule(jsCtx map[string]interface{}, ctx *engine.PacketContext)
 				ctx.Session.Data.Store("last_http_req_headers", h["headers"])
 				ctx.Session.Data.Store("is_http_req", true)
 				ctx.Session.Data.Store("is_http_resp", false)
+
+				// Auto-extract cookies from Cookie header and store in globalCache
+				if hdrs, ok := h["headers"].(map[string]interface{}); ok {
+					for hk, hv := range hdrs {
+						if strings.ToLower(hk) == "cookie" {
+							cookieStr, _ := hv.(string)
+							for _, part := range strings.Split(cookieStr, ";") {
+								part = strings.TrimSpace(part)
+								if idx := strings.IndexByte(part, '='); idx > 0 {
+									cName := strings.TrimSpace(part[:idx])
+									cValue := strings.TrimSpace(part[idx+1:])
+									globalCache.Store("cookie_"+cName, cValue)
+								}
+							}
+							break
+						}
+					}
+				}
 			}
 
 			scheme := "http"
@@ -74,8 +92,34 @@ func RegisterFlowModule(jsCtx map[string]interface{}, ctx *engine.PacketContext)
 			if val, ok := ctx.Session.Data.Load("last_http_req_id"); ok {
 				refID = val
 			}
+			// Fallback: try current_ref for alignment with ctx.Reference()
+			if refID == nil {
+				if refVal, ok := ctx.Session.Data.Load("current_ref"); ok {
+					refID = refVal
+				}
+			}
 			ctx.Session.Data.Store("is_http_resp", true)
 			ctx.Session.Data.Store("is_http_req", false)
+
+			// Auto-extract Set-Cookie from response and store/replace in globalCache
+			if resp := ParseHTTPResponse(payload); resp != nil {
+				if hdrs, ok := resp["headers"].(map[string]interface{}); ok {
+					for hk, hv := range hdrs {
+						if strings.ToLower(hk) == "set-cookie" {
+							setCookieVal, _ := hv.(string)
+							scParts := strings.Split(setCookieVal, ";")
+							if len(scParts) > 0 {
+								first := strings.TrimSpace(scParts[0])
+								if idx := strings.IndexByte(first, '='); idx > 0 {
+									cName := strings.TrimSpace(first[:idx])
+									cValue := strings.TrimSpace(first[idx+1:])
+									globalCache.Store("cookie_"+cName, cValue)
+								}
+							}
+						}
+					}
+				}
+			}
 
 			// Reconstruct URL from session or Metadata
 			host = pkt.Source // IP Fallback
@@ -157,6 +201,11 @@ func RegisterFlowModule(jsCtx map[string]interface{}, ctx *engine.PacketContext)
 				}
 			}
 		}
+	}
+	
+	// Override refID if found in metadata (consolidated by Reference() function)
+	if ref, ok := pkt.Metadata["Reference"].(string); ok && ref != "" {
+		refID = ref
 	}
 
 	jsCtx["Flow"] = map[string]interface{}{
@@ -399,13 +448,39 @@ func RegisterFlowModule(jsCtx map[string]interface{}, ctx *engine.PacketContext)
 			}
 
 			// Capture raw header block
+			rawHeaders := ""
 			headerEnd := bytes.Index(payload, []byte("\r\n\r\n"))
 			if headerEnd == -1 {
 				headerEnd = bytes.Index(payload, []byte("\n\n"))
 			}
-			rawHeaders := ""
 			if headerEnd != -1 {
-				rawHeaders = string(payload[:headerEnd])
+				candidate := string(payload[:headerEnd])
+				// Validate that it looks like real HTTP headers (must contain ":" separator
+				// or start with HTTP/). Without this check, reassembled HTTP/2 responses
+				// may return invalid data like "0" as headers.
+				if strings.Contains(candidate, ":") || strings.HasPrefix(candidate, "HTTP/") {
+					rawHeaders = candidate
+				}
+			}
+
+			// Cache raw headers in session for continuation packets
+			if rawHeaders != "" && ctx.Session != nil {
+				if IsHTTPResponse(payload) {
+					ctx.Session.Data.Store("last_http_resp_raw_headers", rawHeaders)
+				} else if IsHTTPRequest(payload) {
+					ctx.Session.Data.Store("last_http_req_raw_headers", rawHeaders)
+				}
+			} else if rawHeaders == "" && ctx.Session != nil {
+				// Continuation packet: retrieve cached raw headers
+				if v, ok := ctx.Session.Data.Load("is_http_resp"); ok && v.(bool) {
+					if cached, ok := ctx.Session.Data.Load("last_http_resp_raw_headers"); ok {
+						rawHeaders = cached.(string)
+					}
+				} else if v, ok := ctx.Session.Data.Load("is_http_req"); ok && v.(bool) {
+					if cached, ok := ctx.Session.Data.Load("last_http_req_raw_headers"); ok {
+						rawHeaders = cached.(string)
+					}
+				}
 			}
 
 			res := make(map[string]interface{})
@@ -503,15 +578,22 @@ func RegisterFlowModule(jsCtx map[string]interface{}, ctx *engine.PacketContext)
 				if decoded, err := decompressBody(body, contentEncoding); err == nil {
 					body = decoded
 				}
+			} else if len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b {
+				// Auto-detect gzip magic bytes when Content-Encoding header is absent
+				// (e.g. application-level compression indicated by URL params like gz=1)
+				if decoded, err := decompressBody(body, "gzip"); err == nil {
+					body = decoded
+				}
 			}
 
 			// Build smart body object
 			res := make(map[string]interface{})
 
 			// Detect stream properties
+			// NOTE: chunked transfer-encoding is NOT an SSE indicator — it's just a
+			// transport mechanism used by regular JSON/HTML responses too.
 			isStream := strings.Contains(contentType, "text/event-stream") ||
-				strings.Contains(strings.ToLower(transferEncoding), "chunked") ||
-				bytes.Contains(body, []byte("data:"))
+				(bytes.Contains(body, []byte("data:")) && !strings.Contains(contentType, "application/json"))
 
 			res["IsStream"] = func() bool {
 				return isStream
@@ -608,14 +690,47 @@ func RegisterFlowModule(jsCtx map[string]interface{}, ctx *engine.PacketContext)
 					buf.LastPktID = pkt.ID
 
 					// Check for completion
-					if buf.ContentLength >= 0 && int64(len(buf.Data)) >= buf.ContentLength {
-						buf.IsComplete = true
-					} else if buf.IsChunked && bytes.HasSuffix(payload, []byte("0\r\n\r\n")) {
-						buf.IsComplete = true
-					} else if !buf.IsChunked && buf.ContentLength == -1 && !isStream {
-						buf.IsComplete = true
+					if buf.ContentLength >= 0 {
+						if int64(len(buf.Data)) >= buf.ContentLength {
+							buf.IsComplete = true
+						}
+					} else if buf.IsChunked {
+						if bytes.HasSuffix(payload, []byte("0\r\n\r\n")) || bytes.HasSuffix(payload, []byte("0\n\n")) {
+							buf.IsComplete = true
+						}
+					} else if !isStream {
+						// For non-chunked responses without content-length, we must wait for EOF/FIN
+						// But in this hook context, we might not know if it's the last packet.
+						// We'll mark as complete if there's any data and it's a standard short response,
+						// or let the user decide.
+						// IMPROVEMENT: actually check if it's a finished TCP flow if possible.
+						if len(buf.Data) > 0 && !IsHTTPRequest(payload) && !IsHTTPResponse(payload) {
+                             // This is a continuation. If it's small or we've waited, maybe it's done.
+                             // For now, assume it's done if it looks like a complete JSON/HTML block
+                             if bytes.HasSuffix(payload, []byte("</html>")) || bytes.HasSuffix(payload, []byte("}")) {
+                                 buf.IsComplete = true
+                             }
+						}
 					}
 					ctx.Session.Data.Store(txKey, buf)
+				}
+
+				// For SSE streams: there's no packet-level EOF/FIN signal, so we can't
+				// detect when the stream truly ends. Instead, return the accumulated
+				// buffer on every call. Since the caller uses FS.SaveFile() (overwrite),
+				// each successive packet saves the latest accumulated content, and the
+				// final packet before connection close will contain the full stream.
+				if isStream && len(buf.Data) > 0 {
+					streamBody := buf.Data
+					if buf.IsChunked {
+						streamBody = Dechunk(streamBody)
+					}
+					if buf.Encoding != "" {
+						if decoded, err := decompressBody(streamBody, buf.Encoding); err == nil {
+							streamBody = decoded
+						}
+					}
+					return string(streamBody)
 				}
 
 				if buf.IsComplete {
@@ -625,6 +740,22 @@ func RegisterFlowModule(jsCtx map[string]interface{}, ctx *engine.PacketContext)
 					}
 					if buf.Encoding != "" {
 						if decoded, err := decompressBody(finalBody, buf.Encoding); err == nil {
+							finalBody = decoded
+						} else {
+							// Decompression failed - try dechunking then decompress
+							// (handles case where IsChunked wasn't detected properly)
+							if !buf.IsChunked {
+								dechunked := Dechunk(finalBody)
+								if len(dechunked) > 0 && len(dechunked) != len(finalBody) {
+									if decoded2, err2 := decompressBody(dechunked, buf.Encoding); err2 == nil {
+										finalBody = decoded2
+									}
+								}
+							}
+						}
+					} else if len(finalBody) >= 2 && finalBody[0] == 0x1f && finalBody[1] == 0x8b {
+						// Auto-detect gzip magic bytes when Content-Encoding header is absent
+						if decoded, err := decompressBody(finalBody, "gzip"); err == nil {
 							finalBody = decoded
 						}
 					}
@@ -731,8 +862,8 @@ func RegisterFlowModule(jsCtx map[string]interface{}, ctx *engine.PacketContext)
 				if isText(body) {
 					return string(body)
 				}
-				// Return hex for binary data to avoid junk
-				return fmt.Sprintf("[Binary Data: %d bytes]", len(body))
+				// Return hex for binary data
+				return fmt.Sprintf("%x", body)
 			}
 			// Add .Json() method
 			res["Json"] = func() string {
@@ -842,12 +973,28 @@ func RegisterFlowModule(jsCtx map[string]interface{}, ctx *engine.PacketContext)
 				snap["cache"] = cache
 			}
 
+			// Add cookies from globalCache (auto-captured from Cookie/Set-Cookie headers)
+			cookies := make(map[string]interface{})
+			globalCache.Range(func(key, value interface{}) bool {
+				k := fmt.Sprintf("%v", key)
+				if strings.HasPrefix(k, "cookie_") {
+					cookieName := strings.TrimPrefix(k, "cookie_")
+					cookies[cookieName] = value
+				}
+				return true
+			})
+			if len(cookies) > 0 {
+				snap["cookies"] = cookies
+			}
+
 			return snap
 		},
 
-		// Reference returns a correlation ID. For HTTP responses, it returns the ID
-		// of the corresponding request within the same session.
 		"Reference": func() interface{} {
+			// Try to get consolidated ID from metadata first
+			if ref, ok := pkt.Metadata["Reference"].(string); ok && ref != "" {
+				return ref
+			}
 			return refID
 		},
 
@@ -1080,6 +1227,8 @@ func decompressBody(data []byte, encoding string) ([]byte, error) {
 		return decompressDeflate(data)
 	case "br":
 		return decompressBrotli(data)
+	case "zstd":
+		return decompressZstd(data)
 	default:
 		return data, nil
 	}

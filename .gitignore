@@ -10,7 +10,6 @@ reverse
 *.pcap
 *.log
 *.html
-*.txt
 
 # Go
 go.sum

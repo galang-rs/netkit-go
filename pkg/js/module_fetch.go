@@ -2,6 +2,7 @@ package js
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 
 	"github.com/bacot120211/netkit-go/pkg/engine"
 	"github.com/dop251/goja"
+	"golang.org/x/net/proxy"
 )
 
 // RegisterFetchModule injects the global `fetch` function into the VM.
@@ -28,8 +30,10 @@ func RegisterFetchModule(r *Runtime) {
 		// Default options
 		method := "GET"
 		bodyStr := ""
+		var bodyBytes []byte
 		headers := map[string]string{}
 		profileName := ""
+		proxyAddr := ""
 
 		// Parse options (second argument)
 		if len(call.Arguments) > 1 {
@@ -40,6 +44,9 @@ func RegisterFetchModule(r *Runtime) {
 				}
 				if b, ok := optsMap["body"].(string); ok {
 					bodyStr = b
+				} else if b, ok := optsMap["body"].([]byte); ok {
+					// Binary body from JS Uint8Array — preserve raw bytes
+					bodyBytes = b
 				}
 				if h, ok := optsMap["headers"].(map[string]interface{}); ok {
 					for k, v := range h {
@@ -48,6 +55,9 @@ func RegisterFetchModule(r *Runtime) {
 				}
 				if p, ok := optsMap["profile"].(string); ok {
 					profileName = p
+				}
+				if a, ok := optsMap["agent"].(string); ok {
+					proxyAddr = a
 				}
 			}
 		}
@@ -88,12 +98,64 @@ func RegisterFetchModule(r *Runtime) {
 			}
 		}
 
-		resp, err := sandbox.Fetch(profile, method, rawURL, headers, bodyStr, "", nil)
+		// Parse proxy URL if provided (e.g. socks5://user:pass@host:port)
+		var proxyHost string
+		var proxyAuth *proxy.Auth
+		if proxyAddr != "" {
+			if u, err := url.Parse(proxyAddr); err == nil && u.Host != "" {
+				proxyHost = u.Host
+				if u.User != nil {
+					proxyAuth = &proxy.Auth{
+						User: u.User.Username(),
+					}
+					if p, ok := u.User.Password(); ok {
+						proxyAuth.Password = p
+					}
+				}
+			} else {
+				// Assume it's already host:port
+				proxyHost = proxyAddr
+			}
+		}
+
+		// Release the runtime lock before the blocking network call.
+		// This prevents deadlock when proxy traffic re-enters the engine
+		// (e.g. OnPacket/OnConnect trying to re-acquire the same mutex).
+		if bodyBytes != nil {
+			// Binary body from Uint8Array — convert to Go string (byte-level copy,
+			// no UTF-8 encoding). strings.NewReader will then produce the exact bytes.
+			bodyStr = string(bodyBytes)
+		}
+		r.Unlock()
+		resp, err := sandbox.Fetch(profile, method, rawURL, headers, bodyStr, proxyHost, proxyAuth)
+		r.Lock()
+
+		// Merge response Set-Cookie headers into profile's CookieJar.
+		// This ensures fingerprint.snapshoot() returns a profile with
+		// up-to-date cookies. If a key already exists, it gets replaced.
+		if resp != nil && profile.CookieJar != nil {
+			if parsedURL, parseErr := url.Parse(rawURL); parseErr == nil {
+				responseCookies := resp.Cookies()
+				if len(responseCookies) > 0 {
+					profile.CookieJar.SetCookies(parsedURL, responseCookies)
+				}
+			}
+		}
+
 		if err != nil {
+			errMsg := fmt.Sprintf("request failed: %v", err)
+			fmt.Printf("[Fetch Error] %s -> %s\n", rawURL, errMsg)
 			return vm.ToValue(map[string]interface{}{
-				"error":  fmt.Sprintf("request failed: %v", err),
-				"status": 0,
-				"ok":     false,
+				"error":   errMsg,
+				"body":    "",
+				"status":  0,
+				"ok":      false,
+				"headers": map[string]interface{}{},
+				"fingerprint": map[string]interface{}{
+					"snapshoot": func() *browser.Profile {
+						return profile
+					},
+				},
 			})
 		}
 

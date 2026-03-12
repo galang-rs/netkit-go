@@ -46,8 +46,9 @@ type Manager struct {
 	Limiter  *security.BruteforceLimiter
 	Firewall *security.Firewall
 
-	mu   sync.Mutex    // Added
-	Done chan struct{} // Signal to main.go that we should exit
+	mitmDomains map[string]bool // Added for dynamic MITM
+	mu          sync.Mutex      // Added
+	Done        chan struct{}   // Signal to main.go that we should exit
 }
 
 func NewManager(cfg *Config) *Manager {
@@ -59,9 +60,10 @@ func NewManager(cfg *Config) *Manager {
 		eng.SetWorkerCount(cfg.WorkerCount)
 	}
 	return &Manager{
-		Config: cfg,
-		Engine: eng,
-		Done:   make(chan struct{}),
+		Config:      cfg,
+		Engine:      eng,
+		mitmDomains: make(map[string]bool),
+		Done:        make(chan struct{}),
 	}
 }
 
@@ -77,6 +79,13 @@ func (m *Manager) Setup() error {
 			return true
 		}
 		logger.Printf("[Manager] 🔓 Full MITM Interception ENABLED (All domains will be intercepted)\n")
+	} else if m.Config.ShouldMITM == nil {
+		// Default: Use our dynamic domain registry
+		m.Config.ShouldMITM = func(hostname string) bool {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			return m.mitmDomains[strings.ToLower(hostname)]
+		}
 	}
 
 	// Handle "WinDivert" (Driverless Transparent) mode
@@ -603,7 +612,7 @@ func (m *Manager) startH3Listener(ctx context.Context) {
 }
 
 func (m *Manager) RegisterDomain(domain string) {
-	domain = strings.TrimSpace(domain)
+	domain = strings.ToLower(strings.TrimSpace(domain))
 	if domain == "" {
 		return
 	}
@@ -624,6 +633,11 @@ func (m *Manager) RegisterDomain(domain string) {
 		return
 	}
 
+	// Add to MITM domain registry
+	m.mu.Lock()
+	m.mitmDomains[domain] = true
+	m.mu.Unlock()
+
 	// 1. Add to HostsManager (for transparent redirection)
 	if m.HostsMgr != nil {
 		_ = m.HostsMgr.RedirectDomains([]string{domain})
@@ -633,6 +647,13 @@ func (m *Manager) RegisterDomain(domain string) {
 	if m.SNIList != nil {
 		m.SNIList.AddStrictDomain(domain)
 	}
+}
+
+func (m *Manager) InstallCA() error {
+	if m.RootCA == nil {
+		return fmt.Errorf("CA not initialized")
+	}
+	return m.RootCA.InstallToWindows()
 }
 
 // getLocalIPs returns all active IPv4/IPv6 addresses on this machine, including loopback.

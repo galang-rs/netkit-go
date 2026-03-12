@@ -71,16 +71,19 @@ func (r *Runtime) initializeBaseModules(eng engine.Engine, ca *tls.CA) {
 	RegisterMIMEModule(m)
 	RegisterDNSModule(m)
 	RegisterNetModule(r, m)
+	RegisterWebSocketModule(r, m)
 	RegisterHTTPServerModule(r, m, eng)
 	RegisterHTTPModule(m)
-	RegisterTLSModule(r, m)
+	RegisterTLSModule(r, m, eng)
 	RegisterStackModule(r, m)
 	RegisterCryptoModule(m)
+	RegisterProtobufModule(m)
 	RegisterProxyModule(r, r.baseModules, eng, ca, r.ShouldMITM)
 	RegisterTrafficModule(m)
 	RegisterMetricsModule(m)
 	RegisterSyncModule(m)
 	RegisterTestSimModule(m)
+	RegisterSQLiteModule(m)
 	RegisterSecurityModule(m, r.Firewall, r.Scope, r.Limiter)
 	RegisterIDSModule(m)
 	RegisterMemModule(m)
@@ -213,6 +216,7 @@ func NewJSInterceptor(r *Runtime, scriptPath string, eng engine.Engine, ca *tls.
 	RegisterScriptModule(r, map[string]interface{}{})
 	RegisterProxyModule(r, r.baseModules, eng, ca, r.ShouldMITM)
 	r.vm.Set("Proxy", r.baseModules["Proxy"])
+	RegisterTLSModule(r, r.baseModules, eng)
 	RegisterTunnelModule(r, r.baseModules, eng, ca)
 	r.vm.Set("Tunnel", r.baseModules["Tunnel"])
 	RegisterConnectModule(r, r.baseModules) // Ensure connect is available
@@ -264,14 +268,6 @@ func NewJSInterceptor(r *Runtime, scriptPath string, eng engine.Engine, ca *tls.
 		}
 	})
 
-	// Call optional 'init' function if it exists
-	if initHandler != nil {
-		_, err := initHandler(goja.Undefined())
-		if err != nil {
-			return nil, logger.Errorf("init error: %v", err)
-		}
-	}
-
 	// Wire up runtime callbacks
 	r.OnReset = func() {
 		initVal := r.vm.Get("init")
@@ -280,20 +276,24 @@ func NewJSInterceptor(r *Runtime, scriptPath string, eng engine.Engine, ca *tls.
 		}
 	}
 	r.OnExit = func() {
-		// Call 'closing' then exit/restart logic if needed
-		// For now, call closing then we might need a signal to the manager
 		closeVal := r.vm.Get("closing")
 		if closeFn, ok := goja.AssertFunction(closeVal); ok {
 			_, _ = closeFn(goja.Undefined())
 		}
-		// Trigger process exit or engine stop? User says "exit JS dan jalan ulang lagi"
-		// This likely means restarting the interceptor.
-		os.Exit(0) // Simplest way to "exit and restart" if run under a supervisor
+		os.Exit(0)
 	}
 
 	r.OnDomain = func(domain string) {
 		if j, ok := eng.(interface{ RegisterDomain(string) }); ok {
 			j.RegisterDomain(domain)
+		}
+	}
+
+	// Call optional 'init' function if it exists
+	if initHandler != nil {
+		_, err := initHandler(goja.Undefined())
+		if err != nil {
+			return nil, logger.Errorf("init error: %v", err)
 		}
 	}
 
@@ -430,47 +430,54 @@ func (j *JSInterceptor) OnPacket(ctx *engine.PacketContext) error {
 			}
 			ctx.Packet.Metadata["Reference"] = val[0]
 			if ctx.Session != nil {
-				ctx.Session.Data.Store("current_reference", val[0])
+				ctx.Session.Data.Store("current_ref", val[0])
 			}
 			return val[0]
 		}
+		
 		if ctx.Packet.Metadata != nil {
 			if ref, ok := ctx.Packet.Metadata["Reference"].(string); ok && ref != "" {
 				return ref
 			}
 		}
 
-		// For new HTTP requests, ALWAYS generate a new UUID to avoid duplicates in same session
-		if IsHTTPRequest(ctx.Packet.Payload) {
-			ref := uuid.New().String()
-			if ctx.Packet.Metadata == nil {
-				ctx.Packet.Metadata = make(map[string]interface{})
-			}
-			ctx.Packet.Metadata["Reference"] = ref
-			if ctx.Session != nil {
-				ctx.Session.Data.Store("current_reference", ref)
-			}
-			return ref
-		}
-
-		// For responses or other packets, try to load from session
-		if ctx.Session != nil {
-			if refVal, ok := ctx.Session.Data.Load("current_reference"); ok {
-				if ref, ok := refVal.(string); ok && ref != "" {
+		// Try Flow module's refID (based on last_http_req_id) to align
+		// ctx.Reference() with ctx.Flow.Reference() for HTTP correlation.
+		if flow, ok := jsCtx["Flow"].(map[string]interface{}); ok {
+			if refFn, ok := flow["Reference"].(func() interface{}); ok {
+				if flowRef := refFn(); flowRef != nil {
+					ref := fmt.Sprintf("%v", flowRef)
 					if ctx.Packet.Metadata == nil {
 						ctx.Packet.Metadata = make(map[string]interface{})
 					}
 					ctx.Packet.Metadata["Reference"] = ref
+					if ctx.Session != nil {
+						ctx.Session.Data.Store("current_ref", ref)
+					}
 					return ref
 				}
 			}
 		}
-		// Auto-setup UUID as fallback
+
+		if ctx.Session != nil {
+			if refVal, ok := ctx.Session.Data.Load("current_ref"); ok {
+				ref := refVal.(string)
+				if ctx.Packet.Metadata == nil {
+					ctx.Packet.Metadata = make(map[string]interface{})
+				}
+				ctx.Packet.Metadata["Reference"] = ref
+				return ref
+			}
+		}
+
+		ref := uuid.New().String()
 		if ctx.Packet.Metadata == nil {
 			ctx.Packet.Metadata = make(map[string]interface{})
 		}
-		ref := uuid.New().String()
 		ctx.Packet.Metadata["Reference"] = ref
+		if ctx.Session != nil {
+			ctx.Session.Data.Store("current_ref", ref)
+		}
 		return ref
 	}
 	jsCtx["Drop"] = func() {
