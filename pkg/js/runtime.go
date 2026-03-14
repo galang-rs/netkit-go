@@ -90,6 +90,7 @@ func (r *Runtime) initializeBaseModules(eng engine.Engine, ca *tls.CA) {
 	RegisterCLIModule(r, m)
 	RegisterTunnelModule(r, m, eng, ca)
 	RegisterNodeModule(r, m)
+	RegisterDOMModule(r, m)
 
 	// Inject base modules into global scope
 	for k, v := range r.baseModules {

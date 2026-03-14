@@ -19,6 +19,7 @@ Scripts are powered by [Goja](https://github.com/dop251/goja) — a pure Go Java
 11. [Mirror & Traffic Replay (`Mirror`)](#11-mirror--traffic-replay-️)
 12. [Advanced Ad-Blocking](#12-advanced-ad-blocking-️)
 13. [Metadata Keys](#13-metadata-keys-️)
+14. [DOM Engine (`html`)](#14-dom-engine-html-)
 
 ---
 
@@ -750,3 +751,169 @@ All keys in `ctx.Packet.Metadata` use **PascalCase**.
 | `IsPtrResponse` | `true` for async DNS reverse lookups |
 | `IsFetchResponse` | `true` for async HTTP fetch results |
 | `Ad` | Ad detection results (`is_ad`, `matches`, etc.) |
+
+---
+
+## 14. DOM Engine (`html`) 🌐
+
+Pure Go server-side DOM — parse HTML, query via CSS selectors, manipulate, manage cookies & storage.
+
+### Creating a DOM Document
+
+```javascript
+const doc = html('<html><body><h1>Hello</h1></body></html>', {
+    url: 'https://example.com',   // optional: base URL
+    proxy: 'socks5://...'         // optional: for future fetch integration
+});
+```
+
+### CSS Selectors
+
+Full CSS selector engine with tag, `#id`, `.class`, `[attr]`, combinators, and pseudo-classes:
+
+```javascript
+doc.querySelector('h1')                    // first match → node object
+doc.querySelectorAll('.item')              // all matches → array
+doc.select('div > p.cls')                  // alias for querySelectorAll
+doc.getElementById('main')                 // by ID
+doc.getElementsByTagName('p')              // by tag
+doc.getElementsByClassName('active')       // by class
+```
+
+**Supported selectors**: `tag`, `#id`, `.class`, `*`, `[attr]`, `[attr="val"]`, `[attr^=]`, `[attr$=]`, `[attr*=]`, `[attr~=]`, `[attr|=]`, descendant (` `), child (`>`), adjacent (`+`), general sibling (`~`), `:first-child`, `:last-child`, `:nth-child(An+B)`, `:nth-last-child`, `:first-of-type`, `:last-of-type`, `:nth-of-type`, `:only-child`, `:only-of-type`, `:empty`, `:root`, `:not()`, `:contains()`, `:checked`, `:enabled`, `:disabled`, comma groups (`h1, h2`).
+
+### Node Object
+
+Returned by `querySelector` / array items from `querySelectorAll`:
+
+| Property | Description |
+|----------|-------------|
+| `node.tag` | Tag name (e.g., `"div"`) |
+| `node.text` | Text content of node and descendants |
+| `node.html` | Outer HTML |
+| `node.innerHTML` | Inner HTML |
+| `node.id` | ID attribute |
+| `node.classList` | Array of class names |
+| `node.attrs` | Map of all attributes |
+| `node.childCount` | Number of children |
+
+| Method | Description |
+|--------|-------------|
+| `node.querySelector(sel)` | Query within this node |
+| `node.querySelectorAll(sel)` | Query all within this node |
+| `node.getAttribute(key)` | Get attribute value |
+| `node.setAttribute(key, val)` | Set attribute |
+| `node.hasAttribute(key)` | Check attribute exists |
+| `node.removeAttribute(key)` | Remove attribute |
+| `node.setInnerHTML(html)` | Replace children |
+| `node.remove()` | Remove from parent |
+| `node.children()` | Child elements |
+| `node.parent()` | Parent element |
+| `node.nextSibling()` | Next element sibling |
+| `node.previousSibling()` | Previous element sibling |
+
+### DOM Manipulation
+
+| Method | Description |
+|--------|-------------|
+| `doc.innerHTML()` | Body inner HTML |
+| `doc.textContent()` | Full text content |
+| `doc.title()` | Document title |
+| `doc.setInnerHTML(sel, html)` | Replace element content |
+| `doc.setAttribute(sel, attr, val)` | Set attribute on first match |
+| `doc.getAttribute(sel, attr)` | Get attribute from first match |
+| `doc.removeElement(sel)` | Remove all matching elements (returns count) |
+| `doc.appendHTML(sel, html)` | Append children to matched element |
+| `doc.prependHTML(sel, html)` | Prepend children to matched element |
+| `doc.addClass(sel, cls)` | Add class to element |
+| `doc.removeClass(sel, cls)` | Remove class from element |
+
+### Cookie Management
+
+| Method | Description |
+|--------|-------------|
+| `doc.setCookie(name, value, opts)` | Set cookie. Opts: `domain`, `path`, `secure`, `httpOnly`, `sameSite`, `maxAge`, `expires` |
+| `doc.getCookie(name)` | Get cookie value (null if missing) |
+| `doc.getAllCookies()` | Array of `{ name, value, domain, path, secure, httpOnly }` |
+| `doc.deleteCookie(name)` | Delete cookie |
+| `doc.clearCookies()` | Clear all cookies |
+| `doc.cookieString()` | `document.cookie` format string |
+
+### Storage (localStorage)
+
+| Method | Description |
+|--------|-------------|
+| `doc.setStorage(key, value)` | Set item |
+| `doc.getStorage(key)` | Get item (null if missing) |
+| `doc.removeStorage(key)` | Remove item |
+| `doc.clearStorage()` | Clear all |
+| `doc.storageLength()` | Number of items |
+
+### Serialization
+
+| Method | Description |
+|--------|-------------|
+| `doc.serialize()` | Full HTML string with modifications |
+| `doc.snapshot()` | `{ html, url, cookies, storage }` |
+
+### Lifecycle
+
+| Method | Description |
+|--------|-------------|
+| `doc.close()` | Release resources + delete temp screenshot files |
+
+### Screenshot & Rendering
+
+CSS-aware screenshot engine — renders backgrounds, text colors, borders, padding, margins.
+
+```javascript
+doc.screenshot()                                    // → "logs/screenshot/1.png" (auto-increment)
+doc.screenshot({ width: 1920, height: 1080 })      // custom viewport
+doc.screenshot({ scrollY: 500 })                    // capture at scroll position
+doc.screenshot({ fullPage: true })                  // capture entire scrollable page
+doc.screenshot({ selector: "#main" })               // capture specific element
+doc.screenshot({ path: "output/page.png" })         // custom output path
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `width` | number | 1280 | Viewport width in px |
+| `height` | number | 720 | Viewport height in px |
+| `scrollY` | number | 0 | Vertical scroll offset |
+| `fullPage` | bool | false | Capture full content height |
+| `selector` | string | - | CSS selector to capture specific element |
+| `path` | string | auto | Output path (default: `logs/screenshot/N.png`) |
+
+### Page Info & Viewport
+
+```javascript
+const info = doc.pageInfo();
+// → { width: 1280, height: 720, contentHeight: 3200, scrollMin: 0, scrollMax: 2480 }
+
+doc.setViewport(1920, 1080);  // change viewport for subsequent screenshots
+```
+
+```javascript
+function init() {
+    const doc = html(`
+        <html><body>
+            <h1>Welcome</h1>
+            <ul id="list">
+                <li class="item">A</li>
+                <li class="item">B</li>
+            </ul>
+        </body></html>
+    `, { url: 'https://example.com' });
+
+    console.log('Title:', doc.querySelector('h1').text);         // "Welcome"
+    console.log('Items:', doc.querySelectorAll('.item').length);  // 2
+
+    doc.appendHTML('#list', '<li class="item">C</li>');
+    doc.setCookie('session', 'abc123');
+    doc.setStorage('theme', 'dark');
+
+    console.log('HTML:', doc.serialize());
+    console.log('Snapshot:', JSON.stringify(doc.snapshot()));
+    doc.close();
+}
+```

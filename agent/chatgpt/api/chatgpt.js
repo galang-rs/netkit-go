@@ -9,7 +9,6 @@ const Headers = require('../network/headers.js');
 const SSEParser = require('../services/sse-parser.js');
 const Conversation = require('../services/conversation.js');
 const FileUpload = require('../services/file-upload.js');
-const FunctionCalling = require('../services/function-calling.js');
 
 class ChatGPT {
     /**
@@ -93,96 +92,6 @@ class ChatGPT {
 
             } catch (err) {
                 console.error('[ChatGPT] Error:', err);
-                return { success: false, error: String(err), model: model };
-            }
-        });
-    }
-
-    /**
-     * Ask ChatGPT with function/tool calling support.
-     * Tools are injected into the system prompt. The response is parsed
-     * to detect tool calls. If detected, returns tool_calls; otherwise
-     * returns normal text response.
-     *
-     * @param {Array<{role: string, content: string}>} messages
-     * @param {string} [model='gpt-4o-mini']
-     * @param {Array} tools — OpenAI-format tools array
-     * @returns {{ success: boolean, response?: string, toolCalls?: Array, hasToolCalls?: boolean, error?: string, model: string }}
-     */
-    static async askWithTools(messages, model, tools) {
-        model = model || 'gpt-4o-mini';
-
-        // Build tool prompt from tools definitions
-        var toolsPrompt = FunctionCalling.buildToolPrompt(tools);
-
-        // Convert any tool-role messages to user-role messages
-        var convertedMessages = FunctionCalling.convertToolMessages(messages);
-
-        return await Warp.withProxy(async function (proxyUrl, snapshot) {
-            try {
-                // ── Authenticate via sentinel ──
-                var auth = await Sentinel.authenticate(proxyUrl, snapshot);
-
-                // ── Build conversation messages with tools prompt injected ──
-                var conversationMessages = Conversation.buildMessages(convertedMessages, toolsPrompt);
-                console.log('[ChatGPT] Sending tool-calling request (model: ' + model + ', messages: ' + conversationMessages.length + ', tools: ' + tools.length + ')...');
-
-                var conversationBody = JSON.stringify({
-                    action: 'next',
-                    conversation_mode: { kind: 'primary_assistant' },
-                    history_and_training_disabled: true,
-                    is_visible: true,
-                    messages: conversationMessages,
-                    model: model,
-                    supported_encodings: [],
-                    supports_buffering: false
-                });
-
-                var req = await fetch('https://chatgpt.com/backend-anon/conversation', {
-                    method: 'POST',
-                    fingerprint: auth.fp,
-                    agent: proxyUrl,
-                    headers: Headers.build(auth.config, auth.deviceId, auth.oaiBuildId, {
-                        'openai-sentinel-chat-requirements-token': auth.token,
-                        'openai-sentinel-proof-token': auth.powAnswer || '',
-                        'openai-sentinel-turnstile-token': auth.powAnswer || '',
-                        'Accept': 'text/event-stream'
-                    }),
-                    body: conversationBody
-                });
-
-                if (!req.ok) {
-                    return { success: false, error: 'Tool-calling request failed: HTTP ' + req.status + ' — ' + (req.body || '').substring(0, 200), model: model };
-                }
-
-                // ── Parse SSE response ──
-                var parsed = SSEParser.parse(req.body || '');
-
-                if (!parsed.text && parsed.dataLineCount === 0) {
-                    return { success: false, error: 'No data lines in response: ' + parsed.raw, model: model };
-                }
-                if (!parsed.text) {
-                    return { success: false, error: 'Could not extract text from ' + parsed.dataLineCount + ' SSE events. Raw: ' + parsed.raw, model: model };
-                }
-
-                // ── Check for tool calls in response ──
-                var toolResult = FunctionCalling.parseToolCalls(parsed.text);
-                if (toolResult.hasToolCalls) {
-                    console.log('[ChatGPT] ✅ Tool calls detected (' + toolResult.toolCalls.length + ' calls)');
-                    return {
-                        success: true,
-                        hasToolCalls: true,
-                        toolCalls: toolResult.toolCalls,
-                        response: '',
-                        model: model
-                    };
-                }
-
-                console.log('[ChatGPT] ✅ Text response received (' + parsed.text.length + ' chars, no tool calls)');
-                return { success: true, hasToolCalls: false, response: parsed.text, model: model };
-
-            } catch (err) {
-                console.error('[ChatGPT] Tool-calling error:', err);
                 return { success: false, error: String(err), model: model };
             }
         });

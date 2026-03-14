@@ -201,6 +201,11 @@ func RegisterFlowModule(jsCtx map[string]interface{}, ctx *engine.PacketContext)
 				}
 			}
 		}
+
+		// WebSocket detection: mark session as WS if upgrade header is found
+		if IsWebSocket(payload) {
+			ctx.Session.Data.Store("is_ws", true)
+		}
 	}
 	
 	// Override refID if found in metadata (consolidated by Reference() function)
@@ -309,16 +314,25 @@ func RegisterFlowModule(jsCtx map[string]interface{}, ctx *engine.PacketContext)
 
 		// IsWebSocket checks for WebSocket upgrade or frame.
 		"IsWebSocket": func() bool {
-			s := string(payload)
-			ls := strings.ToLower(s)
-			if strings.Contains(ls, "upgrade: websocket") {
+			if IsWebSocket(payload) {
 				return true
 			}
-			// Check for WS frame: first byte has FIN + opcode
-			if len(payload) >= 2 {
-				fin := payload[0] & 0x80
-				opcode := payload[0] & 0x0F
-				if fin != 0 && opcode >= 0x01 && opcode <= 0x0A {
+			// Check session state for WS continuation
+			if ctx.Session != nil {
+				if v, ok := ctx.Session.Data.Load("is_ws"); ok && v.(bool) {
+					return true
+				}
+			}
+			return false
+		},
+
+		// IsWS is a shorthand alias for IsWebSocket.
+		"IsWS": func() bool {
+			if IsWebSocket(payload) {
+				return true
+			}
+			if ctx.Session != nil {
+				if v, ok := ctx.Session.Data.Load("is_ws"); ok && v.(bool) {
 					return true
 				}
 			}
@@ -373,8 +387,7 @@ func RegisterFlowModule(jsCtx map[string]interface{}, ctx *engine.PacketContext)
 			if pkt.DestPort == 443 && strings.ToLower(pkt.Protocol) == "udp" {
 				return "QUIC"
 			}
-			s := strings.ToLower(string(payload))
-			if strings.Contains(s, "upgrade: websocket") {
+			if IsWebSocket(payload) {
 				return "WebSocket"
 			}
 			if pkt.DestPort == 22 || pkt.SourcePort == 22 {

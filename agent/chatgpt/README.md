@@ -23,20 +23,6 @@ curl http://43.129.58.116:8080/v1/chat/completions \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-### Multi-turn (Nested) Chat
-```bash
-curl http://43.129.58.116:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "gpt-5.2",
-    "messages": [
-      {"role": "system", "content": "You are a helpful assistant"},
-      {"role": "user", "content": "plan apa yang aku pakai sekarang"},
-      {"role": "assistant", "content": "Kamu sedang memakai Free Tier."},
-      {"role": "user", "content": "boleh jelaskan"}
-    ]
-  }'
-```
 
 ### Function Calling (Tool Calling)
 

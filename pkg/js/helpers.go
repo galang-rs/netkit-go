@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"io"
 	"strconv"
+	"strings"
 
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
@@ -88,6 +89,27 @@ func IsHTTPRequest(data []byte) bool {
 
 func IsHTTPResponse(data []byte) bool {
 	return bytes.HasPrefix(data, []byte("HTTP/"))
+}
+
+// IsWebSocket checks if payload contains a WebSocket upgrade header or a valid WS frame.
+func IsWebSocket(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	// Check for WebSocket upgrade header
+	ls := strings.ToLower(string(data))
+	if strings.Contains(ls, "upgrade: websocket") {
+		return true
+	}
+	// Check for WS frame: first byte has FIN + opcode (1=text, 2=binary, 8=close, 9=ping, 10=pong)
+	if len(data) >= 2 {
+		fin := data[0] & 0x80
+		opcode := data[0] & 0x0F
+		if fin != 0 && opcode >= 0x01 && opcode <= 0x0A {
+			return true
+		}
+	}
+	return false
 }
 
 // Dechunk removes chunked transfer encoding from data.

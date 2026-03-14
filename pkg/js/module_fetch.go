@@ -126,21 +126,75 @@ func RegisterFetchModule(r *Runtime) {
 			// no UTF-8 encoding). strings.NewReader will then produce the exact bytes.
 			bodyStr = string(bodyBytes)
 		}
-		r.Unlock()
-		resp, err := sandbox.Fetch(profile, method, rawURL, headers, bodyStr, proxyHost, proxyAuth)
-		r.Lock()
 
-		// Merge response Set-Cookie headers into profile's CookieJar.
-		// This ensures fingerprint.snapshoot() returns a profile with
-		// up-to-date cookies. If a key already exists, it gets replaced.
-		if resp != nil && profile.CookieJar != nil {
-			if parsedURL, parseErr := url.Parse(rawURL); parseErr == nil {
-				responseCookies := resp.Cookies()
-				if len(responseCookies) > 0 {
-					profile.CookieJar.SetCookies(parsedURL, responseCookies)
+		// Follow redirects (sandbox.Fetch doesn't follow them by design)
+		maxRedirects := 10
+		currentURL := rawURL
+		var resp *sandbox.Response
+
+		for i := 0; i <= maxRedirects; i++ {
+			r.Unlock()
+			resp, err = sandbox.Fetch(profile, method, currentURL, headers, bodyStr, proxyHost, proxyAuth)
+			r.Lock()
+
+			if err != nil {
+				break
+			}
+
+			// Merge cookies on every hop
+			if resp != nil && profile.CookieJar != nil {
+				if parsedURL, parseErr := url.Parse(currentURL); parseErr == nil {
+					responseCookies := resp.Cookies()
+					if len(responseCookies) > 0 {
+						profile.CookieJar.SetCookies(parsedURL, responseCookies)
+					}
 				}
 			}
+
+			// Check for redirect (301, 302, 303, 307, 308)
+			status := resp.Status()
+			if status >= 300 && status < 400 {
+				location := ""
+				for k, v := range resp.Header() {
+					if strings.EqualFold(k, "Location") && len(v) > 0 {
+						location = v[0]
+						break
+					}
+				}
+				if location == "" {
+					break // No Location header, stop
+				}
+				// Resolve relative redirect
+				if !strings.HasPrefix(location, "http://") && !strings.HasPrefix(location, "https://") {
+					if base, err := url.Parse(currentURL); err == nil {
+						if ref, err := url.Parse(location); err == nil {
+							location = base.ResolveReference(ref).String()
+						}
+					}
+				}
+				currentURL = location
+				// 303 forces GET, others keep method
+				if status == 303 {
+					method = "GET"
+					bodyStr = ""
+				}
+				continue
+			}
+
+			// Also check for <meta http-equiv="refresh"> redirect in HTML
+			if status >= 200 && status < 300 {
+				bodyContent := string(resp.Bytes())
+				if metaURL := extractMetaRefresh(bodyContent, currentURL); metaURL != "" {
+					currentURL = metaURL
+					method = "GET"
+					bodyStr = ""
+					continue
+				}
+			}
+
+			break // Not a redirect, done
 		}
+		rawURL = currentURL // Update to final URL
 
 		if err != nil {
 			errMsg := fmt.Sprintf("request failed: %v", err)
@@ -293,4 +347,70 @@ func RegisterAsyncFetch(jsCtx map[string]interface{}, eng engine.Engine, pkt *en
 			eng.Ingest(respPkt)
 		}()
 	}
+}
+
+// extractMetaRefresh parses <meta http-equiv="refresh" content="...;url=..."> from HTML.
+// Returns the redirect URL if found, empty string otherwise.
+func extractMetaRefresh(html, baseURL string) string {
+	lower := strings.ToLower(html)
+
+	// Find <meta http-equiv="refresh"
+	idx := strings.Index(lower, "http-equiv")
+	if idx == -1 {
+		return ""
+	}
+
+	// Check it's actually a refresh
+	segment := lower[idx:]
+	segEnd := 200
+	if len(segment) < segEnd {
+		segEnd = len(segment)
+	}
+	if !strings.Contains(segment[:segEnd], "refresh") {
+		return ""
+	}
+
+	// Find content="..."
+	contentIdx := strings.Index(segment, "content=")
+	if contentIdx == -1 {
+		return ""
+	}
+
+	// Extract content value
+	rest := segment[contentIdx+8:]
+	var content string
+	if len(rest) > 0 && (rest[0] == '"' || rest[0] == '\'') {
+		quote := rest[0]
+		end := strings.IndexByte(rest[1:], quote)
+		if end == -1 {
+			return ""
+		}
+		content = rest[1 : end+1]
+	}
+
+	// Parse content: "0;url=https://..." or "0; URL=..."
+	content = strings.TrimSpace(content)
+	urlIdx := strings.Index(strings.ToLower(content), "url=")
+	if urlIdx == -1 {
+		return ""
+	}
+	redirectURL := strings.TrimSpace(content[urlIdx+4:])
+	redirectURL = strings.Trim(redirectURL, "'\"")
+
+	if redirectURL == "" {
+		return ""
+	}
+
+	// Resolve relative URL
+	if !strings.HasPrefix(redirectURL, "http://") && !strings.HasPrefix(redirectURL, "https://") {
+		if baseURL != "" {
+			if base, err := url.Parse(baseURL); err == nil {
+				if ref, err := url.Parse(redirectURL); err == nil {
+					redirectURL = base.ResolveReference(ref).String()
+				}
+			}
+		}
+	}
+
+	return redirectURL
 }

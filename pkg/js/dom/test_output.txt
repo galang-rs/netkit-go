@@ -1,0 +1,47 @@
+﻿=== RUN   TestBrowserAPI_SauceDemo_ReactRender
+    browser_api_test.go:2792: [SauceDemo] Loaded bundle: 1905403 bytes (36202 lines)
+    browser_api_test.go:2820: [SauceDemo] Parsing HTML skeleton...
+    browser_api_test.go:2825: [SauceDemo] Skeleton parsed OK. Title: "Swag Labs"
+    browser_api_test.go:2833: [SauceDemo] Browser globals injected. Executing React bundle (1905361 bytes)...
+    browser_api_test.go:2838: [SauceDemo] Script timeout (5s), interrupting VM
+    browser_api_test.go:2851: [SauceDemo] Script error (non-fatal): script execution timeout at <eval>:23016:46(44)
+    browser_api_test.go:2856: [SauceDemo] Script execution took 5.002977s. PendingTimers: 2
+    browser_api_test.go:2865: [SauceDemo] Timer drain took 0s. Remaining: 0
+    browser_api_test.go:2870: 
+        ÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉ
+    browser_api_test.go:2871:   RENDERED DOM STATE
+    browser_api_test.go:2872: ÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉ
+    browser_api_test.go:2884:   Total elements: 8
+    browser_api_test.go:2885:   <div>: 1 | <input>: 0 | <button>: 0 | <form>: 0
+    browser_api_test.go:2887:   <a>: 0 | <span>: 0 | <img>: 0
+    browser_api_test.go:2893: 
+          <body> has 5 direct children:
+    browser_api_test.go:2896:     [1] <noscript id="" class=""> children=1
+    browser_api_test.go:2896:     [3] <div id="root" class=""> children=0
+    browser_api_test.go:2910: 
+          <div id="root"> has 0 children:
+    browser_api_test.go:2915: 
+          ÔöÇÔöÇ Target Element Queries ÔöÇÔöÇ
+    browser_api_test.go:2923:   Ô£ù #user-name ÔåÆ NOT FOUND
+    browser_api_test.go:2923:   Ô£ù #password ÔåÆ NOT FOUND
+    browser_api_test.go:2923:   Ô£ù #login-button ÔåÆ NOT FOUND
+    browser_api_test.go:2923:   Ô£ù .login-box ÔåÆ NOT FOUND
+    browser_api_test.go:2923:   Ô£ù .login_logo ÔåÆ NOT FOUND
+    browser_api_test.go:2923:   Ô£ù form ÔåÆ NOT FOUND
+    browser_api_test.go:2923:   Ô£ù input ÔåÆ NOT FOUND
+    browser_api_test.go:2935: 
+          ÔöÇÔöÇ localStorage ÔöÇÔöÇ
+    browser_api_test.go:2945:   backtrace-last-active = 1773466433236
+    browser_api_test.go:2945:   backtrace-guid = e750ca15-d8d1-4e2a-87ea-f5daecb68b68
+    browser_api_test.go:2950: 
+          ÔöÇÔöÇ Cookies ÔöÇÔöÇ
+    browser_api_test.go:2953:   (empty)
+    browser_api_test.go:2960: ÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉÔòÉ
+    browser_api_test.go:2971: 
+        [SauceDemo] Ô£ô Saved rendered DOM to: preview.html (284 bytes)
+    browser_api_test.go:2982: 
+        ÔÜá React did not fully render (goja needs time for 1.9MB bundle).
+    browser_api_test.go:2983:   Check preview.html to see what WAS rendered.
+--- PASS: TestBrowserAPI_SauceDemo_ReactRender (5.01s)
+PASS
+ok  	github.com/bacot120211/netkit-go/pkg/js/dom	5.043s

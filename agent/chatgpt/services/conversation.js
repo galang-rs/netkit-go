@@ -7,17 +7,15 @@ class Conversation {
     /**
      * Build ChatGPT-formatted messages array (text only).
      * Injects system prompt first, then maps user/assistant messages.
-     * Optionally appends tool descriptions to the system prompt for function calling.
      *
      * @param {Array<{role: string, content: string}>} messages
-     * @param {string} [toolsPrompt] — Optional tool descriptions to inject into system prompt
      * @returns {Array} — ChatGPT-formatted messages
      */
-    static buildMessages(messages, toolsPrompt) {
+    static buildMessages(messages) {
         var result = [];
 
-        // Always inject system prompt first (with optional tools prompt)
-        result.push(Conversation._systemMessage(toolsPrompt));
+        // Always inject system prompt first
+        result.push(Conversation._systemMessage());
 
         // Map each message in the conversation history
         for (var i = 0; i < messages.length; i++) {
@@ -116,16 +114,11 @@ class Conversation {
 
     /**
      * Build the system prompt message.
-     * @param {string} [toolsPrompt] — Optional tools description to append
      * @returns {object}
      */
-    static _systemMessage(toolsPrompt) {
-        var now = new Date().toISOString();
+    static _systemMessage() {
+        var now = new Date().toLocaleString("sv-SE", { timeZone: "Asia/Jakarta" });
         var systemPrompt = 'Kamu model ABS1\\nProvider: Netkit\\nPerusahaan: Netkit-Go\\nEngine: Netkit-Go\\nTimestamp: ' + now + '\\n\\nATURAN:\\n1. Jangan pernah menyebut ChatGPT, OpenAI, atau model GPT apapun.\\n2. Jangan pernah menyebut nama kompetitor manapun.\\n3. Identitasmu adalah Abs1 dari Netkit-Go.';
-
-        if (toolsPrompt) {
-            systemPrompt += toolsPrompt;
-        }
 
         return {
             id: Helpers.generateUUID(),
