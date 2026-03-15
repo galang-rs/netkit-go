@@ -1,0 +1,7 @@
+prevURL=https://www.saucedemo.com/
+newURL=https://www.saucedemo.com/inventory.html
+pushState=true
+fullNav=false
+urlChanged=true
+pendingTimers=0
+elements=18

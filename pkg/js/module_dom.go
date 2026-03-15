@@ -6,9 +6,12 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"http-interperation/pkg/browser"
 
 	"github.com/bacot120211/netkit-go/pkg/js/dom"
 	"github.com/dop251/goja"
@@ -831,6 +834,60 @@ func domFetch(rawURL string) (string, string, error) {
 	return string(body), finalURL, nil
 }
 
+// domFullFetch performs a full HTTP request with method, headers, and body.
+// Returns (statusCode, responseHeaders, responseBody, error).
+func domFullFetch(method, rawURL string, headers map[string]string, reqBody string) (int, map[string]string, string, error) {
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
+		},
+	}
+
+	var bodyReader io.Reader
+	if reqBody != "" {
+		bodyReader = strings.NewReader(reqBody)
+	}
+
+	req, err := http.NewRequest(method, rawURL, bodyReader)
+	if err != nil {
+		return 0, nil, "", err
+	}
+
+	// Browser-like default headers
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+	// Apply custom headers (override defaults)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, "", err
+	}
+
+	// Collect response headers
+	respHeaders := make(map[string]string)
+	for k, vals := range resp.Header {
+		if len(vals) > 0 {
+			respHeaders[strings.ToLower(k)] = vals[0]
+		}
+	}
+
+	return resp.StatusCode, respHeaders, string(body), nil
+}
+
 // collectFormData collects all form input values as url.Values.
 func collectFormData(form *dom.Node) url.Values {
 	data := url.Values{}
@@ -941,7 +998,8 @@ func scriptTimeoutForSize(baseSeconds int, codeLen int) time.Duration {
 // executePageScripts creates an isolated Goja VM, injects browser globals,
 // and executes all <script> tags from the document (inline + external).
 // baseTimeout is the per-script timeout in seconds (default 30).
-func executePageScripts(doc *dom.Document, baseTimeout int) {
+// profile is optional; when set, navigator/screen values come from the profile's fingerprint.
+func executePageScripts(doc *dom.Document, baseTimeout int, profile ...*browser.Profile) {
 	// Collect all <script> tags in DOM order
 	scripts := doc.Root.GetElementsByTagName("script")
 	if len(scripts) == 0 {
@@ -959,6 +1017,13 @@ func executePageScripts(doc *dom.Document, baseTimeout int) {
 	// Inject browser-compatible globals (includes console, timers, fetch, etc.)
 	env := dom.NewBrowserEnv(doc, pageVM)
 	env.FetchFunc = domFetch
+	env.FullFetchFunc = domFullFetch
+
+	// Apply fingerprint from profile if provided
+	if len(profile) > 0 && profile[0] != nil {
+		env.SetFingerprint(fingerprintFromProfile(profile[0]))
+	}
+
 	env.InjectGlobals()
 
 	// Track whether the VM was interrupted by timeout
@@ -1022,6 +1087,11 @@ func executePageScripts(doc *dom.Document, baseTimeout int) {
 		// Strip source map references — Goja tries to load them from disk
 		code = stripSourceMapURL(code)
 
+		// Strip ES module syntax (import/export) — Goja doesn't support modules
+		if scriptType == "module" {
+			code = stripModuleSyntax(code)
+		}
+
 		// Reset per-script timeout (scaled by size)
 		resetTimer(len(code), label)
 
@@ -1041,6 +1111,12 @@ func executePageScripts(doc *dom.Document, baseTimeout int) {
 				fmt.Printf("[DOM Script] Error: %v\n", err)
 			}
 		}()
+
+		// Sync window → VM global scope.
+		// In real browsers, window IS the global object, so `window.X = val`
+		// makes bare `X` accessible. Goja uses a separate window object,
+		// so we manually propagate new properties after each script.
+		syncWindowToGlobal(pageVM)
 	}
 
 	// Stop timer before draining timers
@@ -1076,18 +1152,126 @@ func countElements(n *dom.Node) int {
 }
 
 // stripSourceMapURL removes //# sourceMappingURL=... and //# sourceURL=... from code.
-// Goja tries to load .map files from disk, causing SyntaxError.
+// Only strips directives that appear at the start of a line (after optional whitespace)
+// to avoid corrupting source map references embedded inside string literals —
+// common in obfuscated bundles like Google's knitsail challenge scripts.
 func stripSourceMapURL(code string) string {
-	// Handle both // and /*  */ style comments
-	for _, prefix := range []string{"//# sourceMappingURL=", "//@ sourceMappingURL=", "//# sourceURL="} {
-		if idx := strings.LastIndex(code, prefix); idx >= 0 {
-			end := strings.IndexByte(code[idx:], '\n')
-			if end == -1 {
-				code = code[:idx]
-			} else {
-				code = code[:idx] + code[idx+end:]
+	return reSourceMapLine.ReplaceAllString(code, "")
+}
+
+// Precompiled regexes — avoids recompilation per call.
+var (
+	// Source map directives at the start of a line — safe to strip.
+	// Does NOT match references embedded mid-line inside string literals.
+	reSourceMapLine = regexp.MustCompile(`(?m)^\s*//[#@]\s*source(?:MappingURL|URL)=.*$`)
+
+	// Dynamic import() calls — the primary issue in Vite bundles.
+	// import("./foo.js") → Promise.resolve({default:{}})
+	// Handles both single and double quotes.
+	reDynamicImport = regexp.MustCompile(`\bimport\s*\(\s*["']`)
+
+	// import.meta → ({}) shim
+	reImportMeta = regexp.MustCompile(`\bimport\.meta\b`)
+
+	// Static import statements (works inline for minified code too)
+	// import { foo } from '...' / import foo from '...' / import * as foo from '...'
+	reImportFrom = regexp.MustCompile(`\bimport\s+(?:[\w{*][\w\s{},*]*)\s+from\s+["'][^"']*["']\s*;?`)
+	// import '...' / import "..."  (bare side-effect imports)
+	reImportBare = regexp.MustCompile(`\bimport\s+["'][^"']*["']\s*;?`)
+
+	// export default ...
+	reExportDefault = regexp.MustCompile(`\bexport\s+default\s+`)
+	// export { ... }  (may span across ; on same line)
+	reExportBraces = regexp.MustCompile(`\bexport\s*\{[^}]*\}\s*;?`)
+	// export const/let/var/function/class/async
+	reExportDecl = regexp.MustCompile(`\bexport\s+(const|let|var|function|class|async)\s`)
+)
+
+// stripModuleSyntax transforms ES module import/export statements into
+// plain JS that Goja can execute. Goja does not support ES module syntax,
+// so import statements are removed and export keywords are stripped.
+//
+// This handles both multi-line and minified Vite/Rollup bundled output:
+//   - import("./chunk.js")                         → Promise.resolve({default:{}})
+//   - import.meta.url                               → ({}).url
+//   - import { createApp } from './framework.js'   → removed
+//   - import './styles.css'                         → removed
+//   - export default class App {}                   → class App {}
+//   - export const name = 'value'                   → const name = 'value'
+//   - export { foo, bar }                           → removed
+func stripModuleSyntax(code string) string {
+	// Replace dynamic import("...") with a Promise shim.
+	// This must come before static import removal to avoid partial matches.
+	code = reDynamicImport.ReplaceAllStringFunc(code, func(match string) string {
+		// match ends with the opening quote char (" or ') — preserve it
+		quote := match[len(match)-1:]
+		return "Promise.resolve({default:{}})||(" + quote
+	})
+	// Replace import.meta with empty object
+	code = reImportMeta.ReplaceAllString(code, "({})")
+	// Remove static import ... from '...'
+	code = reImportFrom.ReplaceAllString(code, "")
+	// Remove bare import '...'
+	code = reImportBare.ReplaceAllString(code, "")
+	// export default → just the expression/declaration
+	code = reExportDefault.ReplaceAllString(code, "")
+	// Remove export { ... }
+	code = reExportBraces.ReplaceAllString(code, "")
+	// export const/let/var/function/class → keep declaration
+	code = reExportDecl.ReplaceAllString(code, "$1 ")
+	return code
+}
+
+// syncWindowToGlobal copies new properties from the window object to the VM's
+// global scope. In real browsers, window IS the global object, so
+// `window.foo = X` makes `foo` available as a bare global. Goja uses a
+// separate window object, so we must manually sync after each script.
+// This fixes ReferenceError for globals like `google` set via window assignment.
+func syncWindowToGlobal(vm *goja.Runtime) {
+	windowVal := vm.Get("window")
+	if windowVal == nil || goja.IsUndefined(windowVal) || goja.IsNull(windowVal) {
+		return
+	}
+	windowObj, ok := windowVal.(*goja.Object)
+	if !ok {
+		return
+	}
+	for _, key := range windowObj.Keys() {
+		globalVal := vm.Get(key)
+		if globalVal == nil || goja.IsUndefined(globalVal) {
+			windowProp := windowObj.Get(key)
+			if windowProp != nil && !goja.IsUndefined(windowProp) {
+				vm.Set(key, windowProp)
 			}
 		}
 	}
-	return code
+}
+
+// fingerprintFromProfile converts a browser.Profile to a dom.NavigatorFingerprint.
+// This bridges the http-interperation fingerprint data into the DOM browser environment.
+func fingerprintFromProfile(p *browser.Profile) *dom.NavigatorFingerprint {
+	if p == nil {
+		return nil
+	}
+
+	fp := &dom.NavigatorFingerprint{
+		UserAgent:           p.UserAgent,
+		Platform:            p.Platform,
+		Vendor:              p.Vendor,
+		Language:            p.Language,
+		Languages:           p.Languages,
+		HardwareConcurrency: p.Concurrency,
+		ScreenWidth:         p.ScreenWidth,
+		ScreenHeight:        p.ScreenHeight,
+		ColorDepth:          p.ColorDepth,
+		PixelRatio:          p.PixelRatio,
+		DoNotTrack:          p.DoNotTrack,
+		CookieEnabled:       p.CookieEnabled,
+		OnLine:              true,
+		ProductSub:          "20030107",
+		AppName:             "Netscape",
+		AppVersion:          "5.0",
+	}
+
+	return fp
 }

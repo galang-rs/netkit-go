@@ -11,6 +11,32 @@ import (
 	"github.com/dop251/goja"
 )
 
+// NavigatorFingerprint holds browser fingerprint data for the navigator object.
+// Populate from http-interperation's browser.Profile or browser.BrowserFingerprint.
+// When nil on BrowserEnv, hardcoded defaults are used (backward compatible).
+type NavigatorFingerprint struct {
+	UserAgent           string
+	Platform            string
+	Language            string
+	Languages           []string
+	Vendor              string
+	VendorSub           string
+	ProductSub          string
+	AppCodeName         string
+	AppName             string
+	AppVersion          string
+	HardwareConcurrency int
+	MaxTouchPoints      int
+	DeviceMemory        int
+	ScreenWidth         int
+	ScreenHeight        int
+	ColorDepth          int
+	PixelRatio          float64
+	DoNotTrack          string
+	CookieEnabled       bool
+	OnLine              bool
+}
+
 // BrowserEnv holds the browser-compatible environment for script execution.
 type BrowserEnv struct {
 	Doc           *Document
@@ -18,8 +44,10 @@ type BrowserEnv struct {
 	PendingTimers []func()
 	TimerID       int
 	TimersFrozen  bool                                                       // when true, new timer registrations are silently dropped
-	FetchFunc     func(url string) (body string, finalURL string, err error) // injectable fetch
-	NodeCache     map[*Node]*goja.Object                                     // cache: same *Node → same goja.Object (React expando properties persist)
+	FetchFunc     func(url string) (body string, finalURL string, err error)                                               // injectable fetch (GET-only, legacy)
+	FullFetchFunc func(method, url string, headers map[string]string, body string) (int, map[string]string, string, error) // injectable fetch (full HTTP)
+	NodeCache     map[*Node]*goja.Object                                                                                  // cache: same *Node → same goja.Object (React expando properties persist)
+	Fingerprint   *NavigatorFingerprint                                      // optional; when set, navigator values come from this
 }
 
 // NewBrowserEnv creates a browser environment for script execution.
@@ -30,6 +58,11 @@ func NewBrowserEnv(doc *Document, vm *goja.Runtime) *BrowserEnv {
 		PendingTimers: make([]func(), 0),
 		NodeCache:     make(map[*Node]*goja.Object),
 	}
+}
+
+// SetFingerprint sets the browser fingerprint for navigator/screen values.
+func (env *BrowserEnv) SetFingerprint(fp *NavigatorFingerprint) {
+	env.Fingerprint = fp
 }
 
 // DrainTimers executes pending timer callbacks for up to maxRounds.
@@ -202,22 +235,80 @@ func (env *BrowserEnv) InjectGlobals() {
 		}
 	}
 
-	// ── navigator ──
+	// ── navigator (fingerprint-aware) ──
+	// When env.Fingerprint is set, navigator values come from the fingerprint.
+	// Otherwise, hardcoded defaults are used for backward compatibility.
+	fp := env.Fingerprint
+	navUserAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	navLanguage := "en-US"
+	navLanguages := []string{"en-US", "en"}
+	navPlatform := "Win32"
+	navCookieEnabled := true
+	navOnLine := true
+	navHardwareConcurrency := 8
+	navMaxTouchPoints := 0
+	navVendor := "Google Inc."
+	navVendorSub := ""
+	navProductSub := "20030107"
+	navAppName := "Netscape"
+	navAppVersion := "5.0"
+	navDeviceMemory := 8
+
+	if fp != nil {
+		if fp.UserAgent != "" {
+			navUserAgent = fp.UserAgent
+		}
+		if fp.Language != "" {
+			navLanguage = fp.Language
+		}
+		if len(fp.Languages) > 0 {
+			navLanguages = fp.Languages
+		}
+		if fp.Platform != "" {
+			navPlatform = fp.Platform
+		}
+		navCookieEnabled = fp.CookieEnabled
+		navOnLine = fp.OnLine
+		if fp.HardwareConcurrency > 0 {
+			navHardwareConcurrency = fp.HardwareConcurrency
+		}
+		navMaxTouchPoints = fp.MaxTouchPoints
+		if fp.Vendor != "" {
+			navVendor = fp.Vendor
+		}
+		if fp.VendorSub != "" {
+			navVendorSub = fp.VendorSub
+		}
+		if fp.ProductSub != "" {
+			navProductSub = fp.ProductSub
+		}
+		if fp.AppName != "" {
+			navAppName = fp.AppName
+		}
+		if fp.AppVersion != "" {
+			navAppVersion = fp.AppVersion
+		}
+		if fp.DeviceMemory > 0 {
+			navDeviceMemory = fp.DeviceMemory
+		}
+	}
+
 	vm.Set("navigator", map[string]interface{}{
-		"userAgent":  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-		"language":   "en-US",
-		"languages":  []string{"en-US", "en"},
-		"platform":   "Win32",
-		"cookieEnabled": true,
-		"onLine":     true,
-		"hardwareConcurrency": 8,
-		"maxTouchPoints": 0,
-		"vendor": "Google Inc.",
-		"vendorSub": "",
-		"product": "Gecko",
-		"productSub": "20030107",
-		"appName": "Netscape",
-		"appVersion": "5.0",
+		"userAgent":            navUserAgent,
+		"language":             navLanguage,
+		"languages":            navLanguages,
+		"platform":             navPlatform,
+		"cookieEnabled":        navCookieEnabled,
+		"onLine":               navOnLine,
+		"hardwareConcurrency":  navHardwareConcurrency,
+		"maxTouchPoints":       navMaxTouchPoints,
+		"vendor":               navVendor,
+		"vendorSub":            navVendorSub,
+		"product":              "Gecko",
+		"productSub":           navProductSub,
+		"appName":              navAppName,
+		"appVersion":           navAppVersion,
+		"deviceMemory":         navDeviceMemory,
 		"serviceWorker": map[string]interface{}{
 			"register": func(url string, opts ...interface{}) interface{} {
 				promise, _, reject := vm.NewPromise()
@@ -852,34 +943,268 @@ func (env *BrowserEnv) InjectGlobals() {
 	})
 
 	// ── fetch (synchronous — goja VM is not thread-safe, no goroutines allowed) ──
+	// Browser-compatible: resolves relative URLs, supports method/headers/body,
+	// returns proper Response object.
 	vm.Set("fetch", func(call goja.FunctionCall) goja.Value {
 		promise, resolve, reject := vm.NewPromise()
-		url := ""
+
+		// ── Parse arguments ──
+		rawURL := ""
+		method := "GET"
+		reqHeaders := map[string]string{}
+		reqBody := ""
+
 		if len(call.Arguments) > 0 {
-			url = call.Arguments[0].String()
-		}
-		if env.FetchFunc != nil {
-			body, _, err := env.FetchFunc(url)
-			if err != nil {
-				reject(vm.ToValue(err.Error()))
+			// First arg can be a string URL or a Request object
+			firstArg := call.Arguments[0]
+			if obj := firstArg.ToObject(vm); obj != nil {
+				if urlProp := obj.Get("url"); urlProp != nil && !goja.IsUndefined(urlProp) {
+					// Request object
+					rawURL = urlProp.String()
+					if m := obj.Get("method"); m != nil && !goja.IsUndefined(m) {
+						method = strings.ToUpper(m.String())
+					}
+				} else {
+					rawURL = firstArg.String()
+				}
 			} else {
-				resolve(vm.ToValue(map[string]interface{}{
-					"ok": true, "status": 200,
-					"text": func() interface{} {
-						p2, r2, _ := vm.NewPromise()
-						r2(vm.ToValue(body))
-						return p2
-					},
-					"json": func() interface{} {
-						p2, r2, _ := vm.NewPromise()
-						r2(vm.ToValue(body))
-						return p2
-					},
-				}))
+				rawURL = firstArg.String()
+			}
+		}
+
+		// Parse init options (2nd argument)
+		if len(call.Arguments) > 1 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+			opts := call.Arguments[1].ToObject(vm)
+			if m := opts.Get("method"); m != nil && !goja.IsUndefined(m) {
+				method = strings.ToUpper(m.String())
+			}
+			if h := opts.Get("headers"); h != nil && !goja.IsUndefined(h) && !goja.IsNull(h) {
+				hObj := h.ToObject(vm)
+				for _, key := range hObj.Keys() {
+					reqHeaders[key] = hObj.Get(key).String()
+				}
+			}
+			if b := opts.Get("body"); b != nil && !goja.IsUndefined(b) && !goja.IsNull(b) {
+				reqBody = b.String()
+			}
+		}
+
+		// ── Resolve relative URLs against document URL ──
+		resolvedURL := ResolveURL(rawURL, doc.URL)
+		if resolvedURL == "" {
+			resolvedURL = rawURL
+		}
+
+		// ── Execute fetch ──
+		var statusCode int
+		var respHeaders map[string]string
+		var respBody string
+		var fetchErr error
+
+		if env.FullFetchFunc != nil {
+			statusCode, respHeaders, respBody, fetchErr = env.FullFetchFunc(method, resolvedURL, reqHeaders, reqBody)
+		} else if env.FetchFunc != nil {
+			// Legacy GET-only fallback
+			var body string
+			body, _, fetchErr = env.FetchFunc(resolvedURL)
+			if fetchErr == nil {
+				statusCode = 200
+				respHeaders = map[string]string{"content-type": "text/html"}
+				respBody = body
 			}
 		} else {
 			reject(vm.ToValue("fetch not available"))
+			return vm.ToValue(promise)
 		}
+
+		if fetchErr != nil {
+			reject(vm.ToValue(fetchErr.Error()))
+			return vm.ToValue(promise)
+		}
+
+		// ── Build Response object ──
+		if respHeaders == nil {
+			respHeaders = map[string]string{}
+		}
+
+		// Build a Headers instance via the JS constructor
+		headersObj := vm.NewObject()
+		headersMap := vm.NewObject()
+		for k, v := range respHeaders {
+			headersMap.Set(strings.ToLower(k), v)
+		}
+		headersObj.Set("_headers", headersMap)
+		headersObj.Set("get", func(name string) interface{} {
+			low := strings.ToLower(name)
+			if v, ok := respHeaders[low]; ok {
+				return v
+			}
+			// Try original case
+			for k, v := range respHeaders {
+				if strings.EqualFold(k, name) {
+					return v
+				}
+			}
+			return nil
+		})
+		headersObj.Set("has", func(name string) bool {
+			for k := range respHeaders {
+				if strings.EqualFold(k, name) {
+					return true
+				}
+			}
+			return false
+		})
+		headersObj.Set("forEach", func(callback goja.Callable) {
+			for k, v := range respHeaders {
+				callback(goja.Undefined(), vm.ToValue(v), vm.ToValue(strings.ToLower(k)), vm.ToValue(headersObj))
+			}
+		})
+
+		// Status text mapping
+		statusText := "OK"
+		switch statusCode {
+		case 200:
+			statusText = "OK"
+		case 201:
+			statusText = "Created"
+		case 204:
+			statusText = "No Content"
+		case 301:
+			statusText = "Moved Permanently"
+		case 302:
+			statusText = "Found"
+		case 304:
+			statusText = "Not Modified"
+		case 400:
+			statusText = "Bad Request"
+		case 401:
+			statusText = "Unauthorized"
+		case 403:
+			statusText = "Forbidden"
+		case 404:
+			statusText = "Not Found"
+		case 500:
+			statusText = "Internal Server Error"
+		case 502:
+			statusText = "Bad Gateway"
+		case 503:
+			statusText = "Service Unavailable"
+		}
+
+		// Body consumed flag
+		bodyUsed := false
+		checkBody := func() error {
+			if bodyUsed {
+				return fmt.Errorf("body has already been consumed")
+			}
+			bodyUsed = true
+			return nil
+		}
+
+		respObj := vm.NewObject()
+		respObj.Set("ok", statusCode >= 200 && statusCode < 300)
+		respObj.Set("status", statusCode)
+		respObj.Set("statusText", statusText)
+		respObj.Set("url", resolvedURL)
+		respObj.Set("type", "basic")
+		respObj.Set("redirected", false)
+		respObj.Set("bodyUsed", false)
+		respObj.Set("headers", headersObj)
+
+		respObj.Set("text", func() interface{} {
+			p2, r2, rej2 := vm.NewPromise()
+			if err := checkBody(); err != nil {
+				rej2(vm.ToValue(err.Error()))
+			} else {
+				respObj.Set("bodyUsed", true)
+				r2(vm.ToValue(respBody))
+			}
+			return vm.ToValue(p2)
+		})
+		respObj.Set("json", func() interface{} {
+			p2, r2, rej2 := vm.NewPromise()
+			if err := checkBody(); err != nil {
+				rej2(vm.ToValue(err.Error()))
+			} else {
+				respObj.Set("bodyUsed", true)
+				// Parse JSON via JS for proper type conversion
+				jsonVal, jsErr := vm.RunString("(" + respBody + ")")
+				if jsErr != nil {
+					// Try JSON.parse as fallback
+					vm.Set("__fetchJsonTmp", respBody)
+					jsonVal, jsErr = vm.RunString("JSON.parse(__fetchJsonTmp)")
+					vm.Set("__fetchJsonTmp", goja.Undefined())
+				}
+				if jsErr != nil {
+					rej2(vm.ToValue("SyntaxError: Unexpected token in JSON"))
+				} else {
+					r2(jsonVal)
+				}
+			}
+			return vm.ToValue(p2)
+		})
+		respObj.Set("arrayBuffer", func() interface{} {
+			p2, r2, rej2 := vm.NewPromise()
+			if err := checkBody(); err != nil {
+				rej2(vm.ToValue(err.Error()))
+			} else {
+				respObj.Set("bodyUsed", true)
+				r2(vm.ToValue(vm.NewArrayBuffer([]byte(respBody))))
+			}
+			return vm.ToValue(p2)
+		})
+		respObj.Set("blob", func() interface{} {
+			p2, r2, rej2 := vm.NewPromise()
+			if err := checkBody(); err != nil {
+				rej2(vm.ToValue(err.Error()))
+			} else {
+				respObj.Set("bodyUsed", true)
+				// Return a Blob-like object
+				r2(vm.ToValue(map[string]interface{}{
+					"size": len(respBody),
+					"type": respHeaders["content-type"],
+					"text": func() interface{} {
+						p3, r3, _ := vm.NewPromise()
+						r3(vm.ToValue(respBody))
+						return vm.ToValue(p3)
+					},
+				}))
+			}
+			return vm.ToValue(p2)
+		})
+		respObj.Set("clone", func() interface{} {
+			// clone() returns a new Response with reset bodyUsed
+			cloneObj := vm.NewObject()
+			cloneObj.Set("ok", statusCode >= 200 && statusCode < 300)
+			cloneObj.Set("status", statusCode)
+			cloneObj.Set("statusText", statusText)
+			cloneObj.Set("url", resolvedURL)
+			cloneObj.Set("type", "basic")
+			cloneObj.Set("redirected", false)
+			cloneObj.Set("bodyUsed", false)
+			cloneObj.Set("headers", headersObj)
+			cloneObj.Set("text", func() interface{} {
+				p2, r2, _ := vm.NewPromise()
+				r2(vm.ToValue(respBody))
+				return vm.ToValue(p2)
+			})
+			cloneObj.Set("json", func() interface{} {
+				p2, r2, rej2 := vm.NewPromise()
+				vm.Set("__fetchJsonTmp", respBody)
+				jsonVal, jsErr := vm.RunString("JSON.parse(__fetchJsonTmp)")
+				vm.Set("__fetchJsonTmp", goja.Undefined())
+				if jsErr != nil {
+					rej2(vm.ToValue("SyntaxError"))
+				} else {
+					r2(jsonVal)
+				}
+				return vm.ToValue(p2)
+			})
+			return cloneObj
+		})
+
+		resolve(vm.ToValue(respObj))
 		return vm.ToValue(promise)
 	})
 
@@ -1614,15 +1939,34 @@ func (env *BrowserEnv) createWindowObject(documentObj map[string]interface{}) *g
 	win.Set("innerHeight", doc.ViewportH)
 	win.Set("outerWidth", doc.ViewportW)
 	win.Set("outerHeight", doc.ViewportH)
+	// Screen values — fingerprint-aware with fallback defaults
+	screenW := 1920
+	screenH := 1080
+	colorDepth := 24
+	pixelRatio := 1.0
+	if env.Fingerprint != nil {
+		if env.Fingerprint.ScreenWidth > 0 {
+			screenW = env.Fingerprint.ScreenWidth
+		}
+		if env.Fingerprint.ScreenHeight > 0 {
+			screenH = env.Fingerprint.ScreenHeight
+		}
+		if env.Fingerprint.ColorDepth > 0 {
+			colorDepth = env.Fingerprint.ColorDepth
+		}
+		if env.Fingerprint.PixelRatio > 0 {
+			pixelRatio = env.Fingerprint.PixelRatio
+		}
+	}
 	win.Set("screen", map[string]interface{}{
-		"width":      1920,
-		"height":     1080,
-		"availWidth": 1920,
-		"availHeight": 1040,
-		"colorDepth": 24,
-		"pixelDepth": 24,
+		"width":       screenW,
+		"height":      screenH,
+		"availWidth":  screenW,
+		"availHeight": screenH - 40,
+		"colorDepth":  colorDepth,
+		"pixelDepth":  colorDepth,
 	})
-	win.Set("devicePixelRatio", 1.0)
+	win.Set("devicePixelRatio", pixelRatio)
 	win.Set("scrollX", 0)
 	win.Set("scrollY", 0)
 	win.Set("pageXOffset", 0)

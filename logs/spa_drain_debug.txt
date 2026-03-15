@@ -1,0 +1,2 @@
+SPA drain start: pendingTimers=0 elements=18
+SPA drain done: pendingTimers=0 elements=18

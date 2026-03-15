@@ -1,6 +1,7 @@
 package js
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -360,3 +361,122 @@ func TestDOM_Fetch(t *testing.T) {
 		t.Error("innerHTML should not be empty after fetch")
 	}
 }
+
+func TestStripModuleSyntax(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			name:   "import from single quotes",
+			input:  "import { createApp } from './app.js';",
+			expect: "",
+		},
+		{
+			name:   "import from double quotes",
+			input:  `import { foo, bar } from "lodash";`,
+			expect: "",
+		},
+		{
+			name:   "import default",
+			input:  "import App from './App.svelte';",
+			expect: "",
+		},
+		{
+			name:   "import bare",
+			input:  "import './styles.css';",
+			expect: "",
+		},
+		{
+			name:   "import bare double quotes",
+			input:  `import "./polyfill.js";`,
+			expect: "",
+		},
+		{
+			name:   "export default class",
+			input:  "export default class App {}",
+			expect: "class App {}",
+		},
+		{
+			name:   "export default function",
+			input:  "export default function main() {}",
+			expect: "function main() {}",
+		},
+		{
+			name:   "export braces",
+			input:  "export { foo, bar, baz };",
+			expect: "",
+		},
+		{
+			name:   "export const",
+			input:  "export const name = 'hello';",
+			expect: "const name = 'hello';",
+		},
+		{
+			name:   "export let",
+			input:  "export let count = 0;",
+			expect: "let count = 0;",
+		},
+		{
+			name:   "export function",
+			input:  "export function greet() {}",
+			expect: "function greet() {}",
+		},
+		{
+			name:   "export class",
+			input:  "export class Widget {}",
+			expect: "class Widget {}",
+		},
+		{
+			name:   "export async function",
+			input:  "export async function fetchData() {}",
+			expect: "async function fetchData() {}",
+		},
+		{
+			name:   "passthrough normal code",
+			input:  "const x = 1;\nconsole.log(x);",
+			expect: "const x = 1;\nconsole.log(x);",
+		},
+		{
+			name: "mixed module and normal code",
+			input: `import { h } from 'preact';
+const App = () => h('div', null, 'Hello');
+export default App;`,
+			expect: `
+const App = () => h('div', null, 'Hello');
+App;`,
+		},
+		// ── Dynamic import() and import.meta ──
+		{
+			name:   "dynamic import double quotes",
+			input:  `() => import("./Foo.js")`,
+			expect: `() => Promise.resolve({default:{}})||("./Foo.js")`,
+		},
+		{
+			name:   "dynamic import single quotes",
+			input:  `() => import('./Bar.js')`,
+			expect: `() => Promise.resolve({default:{}})||('./Bar.js')`,
+		},
+		{
+			name:   "import.meta",
+			input:  `const url = import.meta.url;`,
+			expect: `const url = ({}).url;`,
+		},
+		{
+			name:   "inline minified dynamic imports",
+			input:  `var a=()=>import("./A.js"),b=()=>import("./B.js");`,
+			expect: `var a=()=>Promise.resolve({default:{}})||("./A.js"),b=()=>Promise.resolve({default:{}})||("./B.js");`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripModuleSyntax(tt.input)
+			if strings.TrimSpace(got) != strings.TrimSpace(tt.expect) {
+				t.Errorf("stripModuleSyntax(%q)\n  got:  %q\n  want: %q", tt.input, strings.TrimSpace(got), strings.TrimSpace(tt.expect))
+			}
+		})
+	}
+}
+
